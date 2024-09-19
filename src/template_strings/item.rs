@@ -1,0 +1,33 @@
+use super::result::{Result, Error};
+use super::format::{Format, Env};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Item<'a> {
+    Literal(&'a str),
+    Variable(&'a str)
+}
+
+impl<'a> Format<'a> for &Item<'a> {
+    type Output = &'a str;
+    fn format(self, env: &'a Env) -> Result<Self::Output> {
+        use Item::{Literal, Variable};
+        use Error::MissingVariable;
+
+        match *self {
+            Literal(x) => Ok(x),
+            Variable(n) => env.get(&n.to_string()).map(String::as_str)
+                .ok_or(MissingVariable(n.to_string()))
+        }
+    }
+}
+
+impl<'a, T: Iterator<Item=Result<Item<'a>>>> Format<'a> for T {
+    type Output = String;
+    fn format(self, env: &'a Env) -> Result<Self::Output> {
+        let mut result = String::new();
+        for i in self {
+            result.push_str(i?.format(env)?);
+        }
+        return Ok(result);
+    }
+}
