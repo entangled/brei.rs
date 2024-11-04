@@ -1,6 +1,12 @@
 use super::result::{Result, Error};
 use super::format::{Format, Env};
 
+/// An `Item` refers to either a string literal or a variable
+/// reference. `Item` implements the `Format` trait, with a `str`
+/// output.
+///
+/// Any type that implements an iterator over `Item`
+/// also implements the `Format` trait with a `String` output.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Item<'a> {
     Literal(&'a str),

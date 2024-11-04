@@ -44,6 +44,3 @@ pub struct TaskDB<T: Task>{
     tasks: Vec<T>,
     index: HashMap<Target, usize>
 }
-
-impl<T: Task> TaskDB {
-}

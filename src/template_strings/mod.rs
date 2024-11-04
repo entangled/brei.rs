@@ -1,5 +1,13 @@
+//! Run-time processing of template strings
+//!
+
 mod result;
 mod format;
-mod item;
+pub mod item;
 mod curly;
 mod dollar;
+
+pub use result::*;
+pub use item::*;
+pub use format::*;
+pub use dollar::*;

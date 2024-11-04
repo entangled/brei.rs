@@ -2,10 +2,24 @@ use std::iter::Iterator;
 use super::result::{Result, Error};
 use super::item::Item;
 
+/// Iterates `Item` from a `&str` reference using a `${...}` type
+/// string template.
 pub struct Dollar<'a> {
     template: &'a str
 }
 
+/// Create an `Item` iterator for a given dollar-templated string.
+///
+/// # Example
+///
+/// ```rust
+/// let mut env = Env::new();
+/// env.insert(String::from("name"), String::from("Sara"));
+///
+/// assert_eq!(
+///     dollar("Hallo, ${name}!").format(&env).unwrap(),
+///     "Hallo, Sara!");
+/// ```
 pub fn dollar<'a, S>(s: S) -> Dollar<'a> where S: Into<&'a str> {
     Dollar {template: s.into()}
 }
