@@ -1,6 +1,7 @@
 // ~/~ begin <<docs/src/engine.md#src/noodles/mock.rs>>[init]
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use super::task::{Task, Promise, Response, Error, InternalError};
 use super::kernel::Kernel;
 use super::single_worker::SingleWorker;
@@ -11,12 +12,18 @@ struct Mock {
     key: u64,
     deps: Vec<u64>,
     args: HashMap<u64, i64>,
+    memoize: bool,
     func: Func,
 }
 
 impl Mock {
     fn new(key: u64, deps: &[u64], func: impl Fn(&[i64]) -> Response<Mock> + Send + Sync + 'static) -> Self {
-        Mock { key, deps: deps.to_vec(), args: HashMap::new(), func: Arc::new(func) }
+        Mock { key, deps: deps.to_vec(), args: HashMap::new(), memoize: false, func: Arc::new(func) }
+    }
+
+    fn memoized(mut self) -> Self {
+        self.memoize = true;
+        self
     }
 }
 
@@ -30,6 +37,8 @@ impl Task for Mock {
     fn dependencies(&self) -> impl Iterator<Item=u64> {
         self.deps.iter().copied()
     }
+
+    fn memoize(&self) -> bool { self.memoize }
 
     fn run(self) -> Response<Self> {
         let args: Vec<i64> = self.deps.iter().map(|k| self.args[k]).collect();
@@ -107,6 +116,32 @@ fn sum_to(key: u64, n: i64) -> Mock {
     })
 }
 // ~/~ end
+// ~/~ begin <<docs/src/engine.md#mock-memo>>[init]
+const SUM: u64 = u64::MAX;
+
+fn fibonacci_memo(n: u64, runs: Arc<AtomicUsize>) -> Mock {
+    Mock::new(n, &[], move |_| {
+        runs.fetch_add(1, Ordering::Relaxed);
+        if n < 2 {
+            return Response::Value(n as i64);
+        }
+        Response::Continuation(promise(SUM, vec![
+            fibonacci_memo(n - 1, runs.clone()),
+            fibonacci_memo(n - 2, runs.clone()),
+            binop(SUM, n - 1, n - 2, |a, b| a + b),
+        ]))
+    }).memoized()
+}
+
+fn sum_acc(key: u64, n: i64, acc: i64) -> Mock {
+    Mock::new(key, &[], move |_| {
+        if n == 0 {
+            return Response::Value(acc);
+        }
+        Response::Continuation(promise(1, vec![sum_acc(1, n - 1, acc + n)]))
+    })
+}
+// ~/~ end
 
 #[cfg(test)]
 mod tests {
@@ -170,6 +205,44 @@ mod tests {
     fn deep_recursion() {
         let n = 100_000;
         assert_eq!(eval(promise(0, vec![sum_to(0, n)])).unwrap(), n * (n + 1) / 2);
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[5]
+    #[test]
+    fn memoization() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let worker = SingleWorker::new();
+        let mut kernel = Kernel::new();
+        let fib50 = 12_586_269_025;
+
+        assert_eq!(kernel.run(&worker, promise(50, vec![fibonacci_memo(50, runs.clone())])).unwrap(), fib50);
+        assert_eq!(runs.load(Ordering::Relaxed), 51);
+        assert_eq!(kernel.memo_count(), 51);
+        assert_eq!(kernel.frame_count(), 0);
+
+        assert_eq!(kernel.run(&worker, promise(50, vec![fibonacci_memo(50, runs.clone())])).unwrap(), fib50);
+        assert_eq!(runs.load(Ordering::Relaxed), 51);
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[6]
+    #[test]
+    fn local_loop() {
+        let worker = SingleWorker::new();
+        let mut kernel = Kernel::new();
+        let n = 1_000_000;
+        assert_eq!(kernel.run(&worker, promise(0, vec![sum_acc(0, n, 0)])).unwrap(), n * (n + 1) / 2);
+        assert_eq!(kernel.frame_count(), 0);
+        assert_eq!(kernel.memo_count(), 0);
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[7]
+    #[test]
+    fn cycle() {
+        let looping = Mock::new(1, &[], |_| Response::Continuation(promise(2, vec![
+            Mock::new(1, &[], |_| Response::Value(0)).memoized(),
+            Mock::new(2, &[1], |x| Response::Value(x[0])),
+        ]))).memoized();
+        assert!(matches!(eval(promise(1, vec![looping])), Err(Error::Internal(InternalError::NoResult))));
     }
     // ~/~ end
 }

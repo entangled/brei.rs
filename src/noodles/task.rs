@@ -12,6 +12,7 @@ pub trait Task: Sized {
 
     fn key(&self) -> Self::Key;
     fn dependencies(&self) -> impl Iterator<Item=Self::Key>;
+    fn memoize(&self) -> bool;
     fn run(self) -> Response<Self>;
     fn assoc(&mut self, key: Self::Key, value: Self::Value);
     fn ready(&self) -> bool;

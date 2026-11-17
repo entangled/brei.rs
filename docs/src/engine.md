@@ -30,6 +30,7 @@ pub trait Task: Sized {
 
     fn key(&self) -> Self::Key;
     fn dependencies(&self) -> impl Iterator<Item=Self::Key>;
+    fn memoize(&self) -> bool;
     fn run(self) -> Response<Self>;
     fn assoc(&mut self, key: Self::Key, value: Self::Value);
     fn ready(&self) -> bool;
@@ -87,16 +88,36 @@ pub trait Worker<T: Task> {
 }
 ```
 
-The kernel keeps a stack of frames, although it is not really a stack but a tree: every promise that is being evaluated lives in its own frame. Keys only need to be unique within a frame. A frame remembers where its result should go: the frame and key of the task that gave the continuation, or nothing if it is the top-level frame.
+The kernel keeps a stack of frames, although it is not really a stack but a tree: every promise that is being evaluated lives in its own frame. A frame remembers where its result should go: the frame and key of the task that gave the continuation, or nothing if it is the top-level frame.
 
 A task is run only once, so as soon as it is ready the kernel takes it out of its frame and hands it to the worker.
 
 When a task that is *not* the root of its frame gives a continuation, the new frame gets that task as parent. When the root of a frame gives a continuation, the new frame replaces the old one and inherits its parent. This is the equivalent of tail-call optimisation: a chain of tail calls doesn't build up frames.
 
+### Memoization
+
+Most keys only need to be unique within a frame: they name intermediate steps in a computation. Some tasks however have an identity that is shared by the entire graph. In Brei these are the targets: if two rules depend on the same file, that file should be built only once. A task says it is one of these by returning `true` from `memoize()`, and its key must then be unique among all memoized tasks.
+
+The kernel keeps a memo of memoized keys. When a memoized task is ready, the kernel looks up its key:
+
+- not present: the task is submitted, and the key is marked as pending, owned by this frame;
+- pending: the frame is added to the list of waiters, and nothing is submitted;
+- done: the value is delivered to the frame right away.
+
+When the owner of a memoized key gets its final value (possibly after a continuation was resolved), the value is stored in the memo and delivered to all waiters. Because the owner needs to see that final value, a memoized root that gives a continuation doesn't get tail-call optimisation: its frame stays alive until the continuation is done.
+
+Only memoized keys are stored, so a loop of local tail calls still runs in constant memory. The size of the memo is bounded by the number of distinct memoized tasks, which in Brei is the number of targets. The memo survives between calls to `run`, so a second run can reuse earlier results. When a run fails, pending entries are removed.
+
+A memoized task that, through its continuation, ends up waiting for itself will never finish. With the single worker this ends in `NoResult`.
+
+### Implementation
+
+Delivering a value may cause other values to be delivered: the root of a frame finishing will deliver its value to the parent, and a memoized key will deliver to its waiters. Instead of recursing, the kernel keeps a queue of deliveries `(frame, key, value)` that is drained after every response from the worker.
+
 ```rust
 //| file: src/noodles/kernel.rs
 use std::boxed::Box;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use super::task::{Task, Promise, Worker, InternalError, Error, Response};
 
 struct Frame<T: Task> {
@@ -104,19 +125,36 @@ struct Frame<T: Task> {
     promise: Box<Promise<T>>,
 }
 
+enum State<T: Task> {
+    Pending { owner: u64, waiters: Vec<u64> },
+    Done(T::Value),
+}
+
 pub struct Kernel<T: Task> {
     frame_no: u64,
     frames: HashMap<u64, Frame<T>>,
+    memo: HashMap<T::Key, State<T>>,
+    queue: VecDeque<(u64, T::Key, T::Value)>,
 }
 
 impl<T: Task> Kernel<T> {
     pub fn new() -> Self {
-        Self { frame_no: 1, frames: HashMap::new() }
+        Self { frame_no: 1, frames: HashMap::new(), memo: HashMap::new(), queue: VecDeque::new() }
     }
 
     /// Number of frames that are still alive.
     pub fn frame_count(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Number of entries in the memo.
+    pub fn memo_count(&self) -> usize {
+        self.memo.len()
+    }
+
+    /// Whether `frame_id` is responsible for computing the memoized `key`.
+    fn owns(&self, frame_id: u64, key: T::Key) -> bool {
+        matches!(self.memo.get(&key), Some(State::Pending { owner, .. }) if *owner == frame_id)
     }
 
     fn add<W: Worker<T>>(&mut self, worker: &W, parent: Option<(u64, T::Key)>, mut promise: Box<Promise<T>>) -> Result<(), InternalError> {
@@ -127,60 +165,137 @@ impl<T: Task> Kernel<T> {
             .filter(|(_, task)| task.ready())
             .map(|(key, _)| *key)
             .collect();
-        for key in ready {
-            worker.submit(frame_id, promise.tasks.remove(&key).unwrap())?;
-        }
+        let ready: Vec<T> = ready.iter().map(|key| promise.tasks.remove(key).unwrap()).collect();
 
         self.frames.insert(frame_id, Frame { parent, promise });
-        Ok(())
-    }
-
-    fn handle_result<W: Worker<T>>(&mut self, worker: &W, frame_id: u64, key: T::Key, result: T::Value) -> Result<(), InternalError> {
-        let frame = self.frames.get_mut(&frame_id).ok_or(InternalError::MissingFrame(frame_id))?;
-        let Some(dependents) = frame.promise.inverse_deps.get(&key) else {
-            return Ok(());
-        };
-        for dep in dependents {
-            let Some(task) = frame.promise.tasks.get_mut(dep) else { continue };
-            task.assoc(key, result.clone());
-            if task.ready() {
-                worker.submit(frame_id, frame.promise.tasks.remove(dep).unwrap())?;
-            }
+        for task in ready {
+            self.schedule(worker, frame_id, task)?;
         }
         Ok(())
     }
 
-    pub fn run<W: Worker<T>>(&mut self, worker: &W, promise: Box<Promise<T>>) -> Result<T::Value, Error<T>> {
-        self.add(worker, None, promise).map_err(Error::Internal)?;
-
-        for (frame_id, key, response) in worker.listen() {
-            // Results for frames that were already discarded are ignored.
-            let Some(frame) = self.frames.get(&frame_id) else { continue };
-            let is_root = key == frame.promise.root;
-            // The root of a frame reports to the parent; other tasks report to their own frame.
-            let target = if is_root { frame.parent } else { Some((frame_id, key)) };
-            if is_root {
-                self.frames.remove(&frame_id);
+    /// Submit a ready task, unless its result is (or will be) available from the memo.
+    fn schedule<W: Worker<T>>(&mut self, worker: &W, frame_id: u64, task: T) -> Result<(), InternalError> {
+        if task.memoize() {
+            let key = task.key();
+            match self.memo.get_mut(&key) {
+                Some(State::Done(v)) => {
+                    self.queue.push_back((frame_id, key, v.clone()));
+                    return Ok(());
+                }
+                Some(State::Pending { waiters, .. }) => {
+                    waiters.push(frame_id);
+                    return Ok(());
+                }
+                None => {
+                    self.memo.insert(key, State::Pending { owner: frame_id, waiters: Vec::new() });
+                }
             }
+        }
+        worker.submit(frame_id, task)
+    }
 
-            match response {
-                Response::Value(v) => match target {
-                    None => return Ok(v),
-                    Some((target_frame, target_key)) =>
-                        self.handle_result(worker, target_frame, target_key, v).map_err(Error::Internal)?,
-                },
-                Response::Continuation(c) => {
-                    self.add(worker, target, c).map_err(Error::Internal)?;
-                },
-                Response::Error(e) => {
-                    self.frames.clear();
-                    return Err(Error::Job(e));
+    /// Handle a response from the worker.
+    fn respond<W: Worker<T>>(&mut self, worker: &W, frame_id: u64, key: T::Key, response: Response<T>) -> Result<(), Error<T>> {
+        // Results for frames that were already discarded are ignored, unless the memo still needs them.
+        if !self.frames.contains_key(&frame_id) && !self.owns(frame_id, key) {
+            return Ok(());
+        }
+
+        match response {
+            Response::Value(v) => {
+                self.queue.push_back((frame_id, key, v));
+                Ok(())
+            }
+            Response::Continuation(c) => {
+                let tail_call = !self.owns(frame_id, key)
+                    && self.frames.get(&frame_id).is_some_and(|f| f.promise.root == key);
+                if tail_call {
+                    let parent = self.frames.remove(&frame_id).unwrap().parent;
+                    self.add(worker, parent, c).map_err(Error::Internal)
+                } else {
+                    self.add(worker, Some((frame_id, key)), c).map_err(Error::Internal)
+                }
+            }
+            Response::Error(e) => Err(Error::Job(e)),
+        }
+    }
+
+    /// Deliver the final value of `key` in frame `frame_id`. Returns the result of the top-level frame, once known.
+    fn deliver<W: Worker<T>>(&mut self, worker: &W, frame_id: u64, key: T::Key, value: T::Value) -> Result<Option<T::Value>, InternalError> {
+        if self.owns(frame_id, key) {
+            if let Some(State::Pending { waiters, .. }) = self.memo.insert(key, State::Done(value.clone())) {
+                for w in waiters {
+                    self.queue.push_back((w, key, value.clone()));
                 }
             }
         }
 
-        self.frames.clear();
+        let Some(frame) = self.frames.get_mut(&frame_id) else { return Ok(None) };
+
+        // The root of a frame reports to the parent; other tasks report to their own frame.
+        if key == frame.promise.root {
+            let parent = frame.parent;
+            self.frames.remove(&frame_id);
+            return Ok(match parent {
+                None => Some(value),
+                Some((p, pk)) => {
+                    self.queue.push_back((p, pk, value));
+                    None
+                }
+            });
+        }
+
+        let mut ready = Vec::new();
+        if let Some(dependents) = frame.promise.inverse_deps.get(&key) {
+            for dep in dependents {
+                let Some(task) = frame.promise.tasks.get_mut(dep) else { continue };
+                task.assoc(key, value.clone());
+                if task.ready() {
+                    ready.push(*dep);
+                }
+            }
+        }
+        let ready: Vec<T> = ready.iter().map(|dep| frame.promise.tasks.remove(dep).unwrap()).collect();
+        for task in ready {
+            self.schedule(worker, frame_id, task)?;
+        }
+        Ok(None)
+    }
+
+    fn drain<W: Worker<T>>(&mut self, worker: &W) -> Result<Option<T::Value>, InternalError> {
+        while let Some((frame_id, key, value)) = self.queue.pop_front() {
+            if let Some(result) = self.deliver(worker, frame_id, key, value)? {
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
+    }
+
+    fn run_frames<W: Worker<T>>(&mut self, worker: &W, promise: Box<Promise<T>>) -> Result<T::Value, Error<T>> {
+        self.add(worker, None, promise).map_err(Error::Internal)?;
+        if let Some(result) = self.drain(worker).map_err(Error::Internal)? {
+            return Ok(result);
+        }
+
+        for (frame_id, key, response) in worker.listen() {
+            self.respond(worker, frame_id, key, response)?;
+            if let Some(result) = self.drain(worker).map_err(Error::Internal)? {
+                return Ok(result);
+            }
+        }
+
         Err(Error::Internal(InternalError::NoResult))
+    }
+
+    pub fn run<W: Worker<T>>(&mut self, worker: &W, promise: Box<Promise<T>>) -> Result<T::Value, Error<T>> {
+        let result = self.run_frames(worker, promise);
+        if result.is_err() {
+            self.frames.clear();
+            self.queue.clear();
+            self.memo.retain(|_, state| matches!(state, State::Done(_)));
+        }
+        result
     }
 }
 ```
@@ -222,12 +337,13 @@ impl<T: Task> Worker<T> for SingleWorker<T> {
 Mock tasks
 ----------
 
-To test the engine, we have a mock task that computes on integers. Each task has a `u64` key, a list of dependencies and a function that takes the values of its dependencies (in order) and gives a `Response`. Since the function may return a continuation, we can have recursion.
+To test the engine, we have a mock task that computes on integers. Each task has a `u64` key, a list of dependencies and a function that takes the values of its dependencies (in order) and gives a `Response`. Since the function may return a continuation, we can have recursion. Tasks are not memoized, unless built with `.memoized()`.
 
 ```rust
 //| file: src/noodles/mock.rs
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use super::task::{Task, Promise, Response, Error, InternalError};
 use super::kernel::Kernel;
 use super::single_worker::SingleWorker;
@@ -238,12 +354,18 @@ struct Mock {
     key: u64,
     deps: Vec<u64>,
     args: HashMap<u64, i64>,
+    memoize: bool,
     func: Func,
 }
 
 impl Mock {
     fn new(key: u64, deps: &[u64], func: impl Fn(&[i64]) -> Response<Mock> + Send + Sync + 'static) -> Self {
-        Mock { key, deps: deps.to_vec(), args: HashMap::new(), func: Arc::new(func) }
+        Mock { key, deps: deps.to_vec(), args: HashMap::new(), memoize: false, func: Arc::new(func) }
+    }
+
+    fn memoized(mut self) -> Self {
+        self.memoize = true;
+        self
     }
 }
 
@@ -257,6 +379,8 @@ impl Task for Mock {
     fn dependencies(&self) -> impl Iterator<Item=u64> {
         self.deps.iter().copied()
     }
+
+    fn memoize(&self) -> bool { self.memoize }
 
     fn run(self) -> Response<Self> {
         let args: Vec<i64> = self.deps.iter().map(|k| self.args[k]).collect();
@@ -274,6 +398,7 @@ impl Task for Mock {
 
 <<mock-helpers>>
 <<mock-recursion>>
+<<mock-memo>>
 
 #[cfg(test)]
 mod tests {
@@ -440,5 +565,87 @@ Recursion doesn't use the Rust stack, so we can go very deep without overflowing
 fn deep_recursion() {
     let n = 100_000;
     assert_eq!(eval(promise(0, vec![sum_to(0, n)])).unwrap(), n * (n + 1) / 2);
+}
+```
+
+### Memoization
+
+Fibonacci again, but now with memoized tasks: `fibonacci_memo(n)` has key `n`. The addition is a local task, so it gets a key that doesn't clash. A counter keeps track of how many times a Fibonacci task was actually run.
+
+```rust
+//| id: mock-memo
+const SUM: u64 = u64::MAX;
+
+fn fibonacci_memo(n: u64, runs: Arc<AtomicUsize>) -> Mock {
+    Mock::new(n, &[], move |_| {
+        runs.fetch_add(1, Ordering::Relaxed);
+        if n < 2 {
+            return Response::Value(n as i64);
+        }
+        Response::Continuation(promise(SUM, vec![
+            fibonacci_memo(n - 1, runs.clone()),
+            fibonacci_memo(n - 2, runs.clone()),
+            binop(SUM, n - 1, n - 2, |a, b| a + b),
+        ]))
+    }).memoized()
+}
+
+fn sum_acc(key: u64, n: i64, acc: i64) -> Mock {
+    Mock::new(key, &[], move |_| {
+        if n == 0 {
+            return Response::Value(acc);
+        }
+        Response::Continuation(promise(1, vec![sum_acc(1, n - 1, acc + n)]))
+    })
+}
+```
+
+Each Fibonacci number is computed exactly once. Running again with the same kernel takes the answer from the memo.
+
+```rust
+//| id: mock-tests
+#[test]
+fn memoization() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let worker = SingleWorker::new();
+    let mut kernel = Kernel::new();
+    let fib50 = 12_586_269_025;
+
+    assert_eq!(kernel.run(&worker, promise(50, vec![fibonacci_memo(50, runs.clone())])).unwrap(), fib50);
+    assert_eq!(runs.load(Ordering::Relaxed), 51);
+    assert_eq!(kernel.memo_count(), 51);
+    assert_eq!(kernel.frame_count(), 0);
+
+    assert_eq!(kernel.run(&worker, promise(50, vec![fibonacci_memo(50, runs.clone())])).unwrap(), fib50);
+    assert_eq!(runs.load(Ordering::Relaxed), 51);
+}
+```
+
+A loop of local tail calls leaves nothing behind.
+
+```rust
+//| id: mock-tests
+#[test]
+fn local_loop() {
+    let worker = SingleWorker::new();
+    let mut kernel = Kernel::new();
+    let n = 1_000_000;
+    assert_eq!(kernel.run(&worker, promise(0, vec![sum_acc(0, n, 0)])).unwrap(), n * (n + 1) / 2);
+    assert_eq!(kernel.frame_count(), 0);
+    assert_eq!(kernel.memo_count(), 0);
+}
+```
+
+A memoized task that waits for itself never finishes.
+
+```rust
+//| id: mock-tests
+#[test]
+fn cycle() {
+    let looping = Mock::new(1, &[], |_| Response::Continuation(promise(2, vec![
+        Mock::new(1, &[], |_| Response::Value(0)).memoized(),
+        Mock::new(2, &[1], |x| Response::Value(x[0])),
+    ]))).memoized();
+    assert!(matches!(eval(promise(1, vec![looping])), Err(Error::Internal(InternalError::NoResult))));
 }
 ```
