@@ -14,10 +14,6 @@ The binary is the `brei` command-line program.
 
 ```rust
 //| file: src/main.rs
-mod data;
-mod task;
-// mod noodles;
-
 fn main() {
     println!("Hello, world!");
 }
