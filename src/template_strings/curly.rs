@@ -12,10 +12,6 @@ pub fn curly<'a, S>(s: S) -> Curly<'a> where S: Into<&'a str> {
 }
 
 impl<'a> Curly<'a> {
-    fn new(template: &'a str) -> Self {
-        Curly {template}
-    }
-
     fn flush(&mut self) -> &'a str {
         let (result, end) = self.template.split_at(self.template.len());
         self.template = end;
@@ -81,23 +77,23 @@ mod tests {
 
     #[test]
     fn test_iterator() {
-        let it1 = Curly::new("Hello");
+        let it1 = curly("Hello");
         let re1: Result<Vec<Item>> = it1.collect();
         assert_eq!(re1.unwrap(), vec![Literal("Hello")]);
 
-        let it2 = Curly::new("Hello, {name}!");
+        let it2 = curly("Hello, {name}!");
         let re2: Result<Vec<Item>> = it2.collect();
         assert_eq!(re2.unwrap(), vec![Literal("Hello, "), Variable("name"), Literal("!")]);
 
-        let it3 = Curly::new("Hello, }name{");
+        let it3 = curly("Hello, }name{");
         let re3: Result<Vec<Item>> = it3.collect();
         assert!(matches!(re3, Err(Error::InvalidTemplate(_))));
 
-        let it4 = Curly::new("Hell, {name");
+        let it4 = curly("Hell, {name");
         let re4: Result<Vec<Item>> = it4.collect();
         assert!(matches!(re4, Err(Error::InvalidTemplate(_))));
 
-        let it5 = Curly::new("}} Literal {{");
+        let it5 = curly("}} Literal {{");
         let re5: Result<Vec<Item>> = it5.collect();
         assert_eq!(re5.unwrap(), vec![Literal("}"), Literal(" Literal "), Literal("{")]);
     }
