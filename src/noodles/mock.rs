@@ -1,13 +1,15 @@
 // ~/~ begin <<docs/src/engine.md#src/noodles/mock.rs>>[init]
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use super::task::{Task, Promise, Response, Error, InternalError};
+use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+use super::task::{Task, Promise, Response, Error, InternalError, CancelToken};
 use super::kernel::Kernel;
 use super::single_worker::SingleWorker;
 use super::worker_pool::WorkerPool;
 
-type Func = Arc<dyn Fn(&[i64]) -> Response<Mock> + Send + Sync>;
+type Func = Arc<dyn Fn(&[i64], &CancelToken) -> Response<Mock> + Send + Sync>;
 
 struct Mock {
     key: u64,
@@ -19,6 +21,10 @@ struct Mock {
 
 impl Mock {
     fn new(key: u64, deps: &[u64], func: impl Fn(&[i64]) -> Response<Mock> + Send + Sync + 'static) -> Self {
+        Self::cancellable(key, deps, move |x, _| func(x))
+    }
+
+    fn cancellable(key: u64, deps: &[u64], func: impl Fn(&[i64], &CancelToken) -> Response<Mock> + Send + Sync + 'static) -> Self {
         Mock { key, deps: deps.to_vec(), args: HashMap::new(), memoize: false, func: Arc::new(func) }
     }
 
@@ -41,9 +47,9 @@ impl Task for Mock {
 
     fn memoize(&self) -> bool { self.memoize }
 
-    fn run(self) -> Response<Self> {
+    fn run(self, cancel: &CancelToken) -> Response<Self> {
         let args: Vec<i64> = self.deps.iter().map(|k| self.args[k]).collect();
-        (self.func)(&args)
+        (self.func)(&args, cancel)
     }
 
     fn assoc(&mut self, key: u64, value: i64) {
@@ -143,6 +149,14 @@ fn sum_acc(key: u64, n: i64, acc: i64) -> Mock {
     })
 }
 // ~/~ end
+// ~/~ begin <<docs/src/engine.md#mock-memo>>[1]
+fn needs(key: u64, dep: u64) -> Mock {
+    Mock::new(key, &[], move |_| Response::Continuation(promise(SUM, vec![
+        needs(dep, key),
+        Mock::new(SUM, &[dep], |x| Response::Value(x[0])),
+    ]))).memoized()
+}
+// ~/~ end
 
 #[cfg(test)]
 mod tests {
@@ -151,9 +165,7 @@ mod tests {
     fn eval(p: Box<Promise<Mock>>) -> Result<i64, Error<Mock>> {
         let worker = SingleWorker::new();
         let mut kernel = Kernel::new();
-        let result = kernel.run(&worker, p);
-        assert_eq!(kernel.frame_count(), 0);
-        result
+        kernel.run(&worker, p)
     }
 
     // ~/~ begin <<docs/src/engine.md#mock-tests>>[init]
@@ -181,7 +193,7 @@ mod tests {
                 Response::Value(x[0] / x[1])
             }),
         ]);
-        assert!(matches!(eval(p), Err(Error::Job(e)) if e == "division by zero"));
+        assert!(matches!(eval(p), Err(Error::Jobs(e)) if e == ["division by zero"]));
     }
     // ~/~ end
     // ~/~ begin <<docs/src/engine.md#mock-tests>>[2]
@@ -219,7 +231,6 @@ mod tests {
         assert_eq!(kernel.run(&worker, promise(50, vec![fibonacci_memo(50, runs.clone())])).unwrap(), fib50);
         assert_eq!(runs.load(Ordering::Relaxed), 51);
         assert_eq!(kernel.memo_count(), 51);
-        assert_eq!(kernel.frame_count(), 0);
 
         assert_eq!(kernel.run(&worker, promise(50, vec![fibonacci_memo(50, runs.clone())])).unwrap(), fib50);
         assert_eq!(runs.load(Ordering::Relaxed), 51);
@@ -232,7 +243,6 @@ mod tests {
         let mut kernel = Kernel::new();
         let n = 1_000_000;
         assert_eq!(kernel.run(&worker, promise(0, vec![sum_acc(0, n, 0)])).unwrap(), n * (n + 1) / 2);
-        assert_eq!(kernel.frame_count(), 0);
         assert_eq!(kernel.memo_count(), 0);
     }
     // ~/~ end
@@ -243,16 +253,20 @@ mod tests {
             Mock::new(1, &[], |_| Response::Value(0)).memoized(),
             Mock::new(2, &[1], |x| Response::Value(x[0])),
         ]))).memoized();
-        assert!(matches!(eval(promise(1, vec![looping])), Err(Error::Internal(InternalError::NoResult))));
+        assert!(matches!(eval(promise(1, vec![looping])), Err(Error::Cycle(c)) if c == [1]));
     }
     // ~/~ end
     // ~/~ begin <<docs/src/engine.md#mock-tests>>[8]
+    #[test]
+    fn indirect_cycle() {
+        assert!(matches!(eval(promise(1, vec![needs(1, 2)])), Err(Error::Cycle(c)) if c == [1, 2]));
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[9]
     fn eval_pool(p: Box<Promise<Mock>>) -> Result<i64, Error<Mock>> {
         let worker = WorkerPool::new(4);
         let mut kernel = Kernel::new();
-        let result = kernel.run(&worker, p);
-        assert_eq!(kernel.frame_count(), 0);
-        result
+        kernel.run(&worker, p)
     }
 
     #[test]
@@ -278,11 +292,11 @@ mod tests {
             Mock::new(1, &[], |_| Response::Error("failed".into())),
             Mock::new(2, &[1], |x| Response::Value(x[0])),
         ]);
-        assert!(matches!(eval_pool(p), Err(Error::Job(e)) if e == "failed"));
+        assert!(matches!(eval_pool(p), Err(Error::Jobs(e)) if e == ["failed"]));
         assert!(matches!(eval_pool(promise(2, vec![binop(2, 1, 3, |a, b| a + b)])), Err(Error::Internal(InternalError::NoResult))));
     }
     // ~/~ end
-    // ~/~ begin <<docs/src/engine.md#mock-tests>>[9]
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[10]
     #[test]
     fn pool_parallel() {
         let barrier = Arc::new(std::sync::Barrier::new(4));
@@ -297,11 +311,64 @@ mod tests {
         assert_eq!(eval_pool(promise(5, tasks)).unwrap(), 10);
     }
     // ~/~ end
-    // ~/~ begin <<docs/src/engine.md#mock-tests>>[10]
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[11]
     #[test]
     #[should_panic(expected = "boom")]
     fn pool_panic() {
         let _ = eval_pool(promise(1, vec![Mock::new(1, &[], |_| panic!("boom"))]));
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[12]
+    #[test]
+    fn keep_going_collects_errors() {
+        let deep_error = Mock::new(2, &[], |_| Response::Continuation(promise(1, vec![
+            Mock::new(1, &[], |_| Response::Error("deep".into())),
+        ])));
+        let p = promise(3, vec![
+            Mock::new(1, &[], |_| Response::Error("shallow".into())),
+            deep_error,
+            binop(3, 1, 2, |a, b| a + b),
+        ]);
+        let worker = SingleWorker::new();
+        let mut kernel = Kernel::new().keep_going();
+        let Err(Error::Jobs(mut errors)) = kernel.run(&worker, p) else { panic!("expected errors") };
+        errors.sort();
+        assert_eq!(errors, ["deep", "shallow"]);
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[13]
+    #[test]
+    fn pool_cancel() {
+        let barrier = Arc::new(Barrier::new(2));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let p = {
+            let (b1, b2) = (barrier.clone(), barrier.clone());
+            let cancelled = cancelled.clone();
+            promise(3, vec![
+                Mock::new(1, &[], move |_| {
+                    b1.wait();
+                    Response::Error("failed".into())
+                }),
+                Mock::cancellable(2, &[], move |_, token| {
+                    b2.wait();
+                    let start = Instant::now();
+                    while start.elapsed() < Duration::from_secs(10) {
+                        if token.is_cancelled() {
+                            cancelled.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Response::Value(0)
+                }),
+                binop(3, 1, 2, |a, b| a + b),
+            ])
+        };
+
+        let start = Instant::now();
+        assert!(matches!(eval_pool(p), Err(Error::Jobs(e)) if e == ["failed"]));
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
     // ~/~ end
 }

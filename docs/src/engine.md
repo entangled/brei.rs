@@ -22,6 +22,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::iter::Iterator;
 use std::hash::Hash;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 
 pub trait Task: Sized {
@@ -32,7 +34,7 @@ pub trait Task: Sized {
     fn key(&self) -> Self::Key;
     fn dependencies(&self) -> impl Iterator<Item=Self::Key>;
     fn memoize(&self) -> bool;
-    fn run(self) -> Response<Self>;
+    fn run(self, cancel: &CancelToken) -> Response<Self>;
     fn assoc(&mut self, key: Self::Key, value: Self::Value);
     fn ready(&self) -> bool;
 }
@@ -51,14 +53,22 @@ pub enum InternalError {
 }
 
 pub enum Error<T: Task> {
-    Job(T::Error),
+    Jobs(Vec<T::Error>),
+    Cycle(Vec<T::Key>),
     Internal(InternalError)
 }
 
-impl<T: Task> fmt::Debug for Error<T> where T::Error: fmt::Debug {
+impl<T: Task> From<InternalError> for Error<T> {
+    fn from(e: InternalError) -> Self {
+        Error::Internal(e)
+    }
+}
+
+impl<T: Task> fmt::Debug for Error<T> where T::Error: fmt::Debug, T::Key: fmt::Debug {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Job(e) => f.debug_tuple("Job").field(e).finish(),
+            Error::Jobs(e) => f.debug_tuple("Jobs").field(e).finish(),
+            Error::Cycle(c) => f.debug_tuple("Cycle").field(c).finish(),
             Error::Internal(e) => f.debug_tuple("Internal").field(e).finish(),
         }
     }
@@ -86,6 +96,31 @@ impl<T: Task> Promise<T> {
 pub trait Worker<T: Task> {
     fn submit(&self, frame_id: u64, task: T) -> Result<(), InternalError>;
     fn listen(&self) -> impl Iterator<Item=(u64, T::Key, Response<T>)>;
+    fn cancel(&self);
+}
+
+<<cancel-token>>
+```
+
+Tasks are given a `CancelToken` when they are run. A task that takes a long time, like running an external program, should check it every now and then, and stop when it is cancelled. What a cancelled task returns doesn't matter, as the response will be thrown away.
+
+```rust
+//| id: cancel-token
+#[derive(Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
 }
 ```
 
@@ -103,49 +138,93 @@ The kernel keeps a memo of memoized keys. When a memoized task is ready, the ker
 
 - not present: the task is submitted, and the key is marked as pending, owned by this frame;
 - pending: the frame is added to the list of waiters, and nothing is submitted;
-- done: the value is delivered to the frame right away.
+- done (or failed): the outcome is delivered to the frame right away.
 
 When the owner of a memoized key gets its final value (possibly after a continuation was resolved), the value is stored in the memo and delivered to all waiters. Because the owner needs to see that final value, a memoized root that gives a continuation doesn't get tail-call optimisation: its frame stays alive until the continuation is done.
 
-Only memoized keys are stored, so a loop of local tail calls still runs in constant memory. The size of the memo is bounded by the number of distinct memoized tasks, which in Brei is the number of targets. The memo survives between calls to `run`, so a second run can reuse earlier results. When a run fails, pending entries are removed.
+Only memoized keys are stored, so a loop of local tail calls still runs in constant memory. The size of the memo is bounded by the number of distinct memoized tasks, which in Brei is the number of targets. Computed values survive between calls to `run`, so a second run can reuse earlier results. Everything else (pending and failed entries) is removed at the end of a run, so a failed task will be tried again next time.
 
-A memoized task that, through its continuation, ends up waiting for itself will never finish. With the single worker this ends in `NoResult`.
+### Failure
+
+By default the kernel stops at the first error: the error is returned, and all tasks that are still running are cancelled. For a build system it is often more useful to do as much as possible, and only skip what depends on a failure, like `make -k`. A kernel created with `.keep_going()` does that:
+
+- a task that gives an error is marked as failed, and the error is stored;
+- a task that depends on a failed task fails as well, without being run. If that task is the root of its frame, the failure is passed on to the parent. The frame itself is kept, because other tasks in it may still be running and their results may be needed elsewhere, through the memo;
+- a failed memoized key is stored in the memo as failed, so that all frames waiting for it fail too.
+
+The run ends when the top-level frame has a value, or when no work is left. If any task failed, the result is `Error::Jobs` with all errors, in the order they happened.
+
+### Cycles
+
+A memoized task that, through its continuation, ends up waiting for itself would never finish. Every frame knows its *enclosing* memoized key: the closest memoized task on the way up its chain of parents, whose result the frame is helping to compute. If a frame owns or waits for key `K`, then its enclosing key waits for `K`. The kernel keeps these edges in a graph. Before adding a waiter, it checks whether `K` already (indirectly) waits for the enclosing key. If it does, adding the edge would close a loop, so the run stops with `Error::Cycle`. The cycle lists the keys in order: each waits for the next, and the last waits for the first.
+
+Edges for a memoized key are removed once its value is known, so the graph only contains the computations that are still running.
+
+Cycles between local tasks in a single promise are not detected: those tasks will never be ready, and the run ends with `NoResult`.
 
 ### Implementation
 
-Delivering a value may cause other values to be delivered: the root of a frame finishing will deliver its value to the parent, and a memoized key will deliver to its waiters. Instead of recursing, the kernel keeps a queue of deliveries `(frame, key, value)` that is drained after every response from the worker.
+Delivering a value may cause other values to be delivered: the root of a frame finishing will deliver its value to the parent, and a memoized key will deliver to its waiters. Instead of recursing, the kernel keeps a queue of deliveries `(frame, key, outcome)` that is drained after every response from the worker.
 
 ```rust
 //| file: src/noodles/kernel.rs
 use std::boxed::Box;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use super::task::{Task, Promise, Worker, InternalError, Error, Response};
 
 struct Frame<T: Task> {
     parent: Option<(u64, T::Key)>,
+    enclosing: Option<T::Key>,
     promise: Box<Promise<T>>,
 }
 
 enum State<T: Task> {
     Pending { owner: u64, waiters: Vec<u64> },
     Done(T::Value),
+    Failed,
+}
+
+enum Outcome<T: Task> {
+    Value(T::Value),
+    Failed,
+}
+
+impl<T: Task> Clone for Outcome<T> {
+    fn clone(&self) -> Self {
+        match self {
+            Outcome::Value(v) => Outcome::Value(v.clone()),
+            Outcome::Failed => Outcome::Failed,
+        }
+    }
 }
 
 pub struct Kernel<T: Task> {
+    keep_going: bool,
     frame_no: u64,
     frames: HashMap<u64, Frame<T>>,
     memo: HashMap<T::Key, State<T>>,
-    queue: VecDeque<(u64, T::Key, T::Value)>,
+    waits_for: HashMap<T::Key, Vec<T::Key>>,
+    queue: VecDeque<(u64, T::Key, Outcome<T>)>,
+    errors: Vec<T::Error>,
 }
 
 impl<T: Task> Kernel<T> {
     pub fn new() -> Self {
-        Self { frame_no: 1, frames: HashMap::new(), memo: HashMap::new(), queue: VecDeque::new() }
+        Self {
+            keep_going: false,
+            frame_no: 1,
+            frames: HashMap::new(),
+            memo: HashMap::new(),
+            waits_for: HashMap::new(),
+            queue: VecDeque::new(),
+            errors: Vec::new(),
+        }
     }
 
-    /// Number of frames that are still alive.
-    pub fn frame_count(&self) -> usize {
-        self.frames.len()
+    /// Don't stop at the first error, but run everything that doesn't depend on a failed task.
+    pub fn keep_going(mut self) -> Self {
+        self.keep_going = true;
+        self
     }
 
     /// Number of entries in the memo.
@@ -158,9 +237,39 @@ impl<T: Task> Kernel<T> {
         matches!(self.memo.get(&key), Some(State::Pending { owner, .. }) if *owner == frame_id)
     }
 
-    fn add<W: Worker<T>>(&mut self, worker: &W, parent: Option<(u64, T::Key)>, mut promise: Box<Promise<T>>) -> Result<(), InternalError> {
+    /// A path from `from` to `to` in the waits-for graph, if there is one.
+    fn find_path(&self, from: T::Key, to: T::Key) -> Option<Vec<T::Key>> {
+        let mut previous: HashMap<T::Key, T::Key> = HashMap::new();
+        let mut seen = HashSet::from([from]);
+        let mut todo = VecDeque::from([from]);
+        while let Some(key) = todo.pop_front() {
+            if key == to {
+                let mut path = vec![to];
+                while let Some(k) = previous.get(path.last().unwrap()) {
+                    path.push(*k);
+                }
+                path.reverse();
+                return Some(path);
+            }
+            for next in self.waits_for.get(&key).into_iter().flatten() {
+                if seen.insert(*next) {
+                    previous.insert(*next, key);
+                    todo.push_back(*next);
+                }
+            }
+        }
+        None
+    }
+
+    fn add<W: Worker<T>>(&mut self, worker: &W, parent: Option<(u64, T::Key)>, mut promise: Box<Promise<T>>) -> Result<(), Error<T>> {
         let frame_id = self.frame_no;
         self.frame_no += 1;
+
+        let enclosing = match parent {
+            Some((p, k)) if self.owns(p, k) => Some(k),
+            Some((p, _)) => self.frames.get(&p).and_then(|f| f.enclosing),
+            None => None,
+        };
 
         let ready: Vec<T::Key> = promise.tasks.iter()
             .filter(|(_, task)| task.ready())
@@ -168,7 +277,7 @@ impl<T: Task> Kernel<T> {
             .collect();
         let ready: Vec<T> = ready.iter().map(|key| promise.tasks.remove(key).unwrap()).collect();
 
-        self.frames.insert(frame_id, Frame { parent, promise });
+        self.frames.insert(frame_id, Frame { parent, enclosing, promise });
         for task in ready {
             self.schedule(worker, frame_id, task)?;
         }
@@ -176,24 +285,39 @@ impl<T: Task> Kernel<T> {
     }
 
     /// Submit a ready task, unless its result is (or will be) available from the memo.
-    fn schedule<W: Worker<T>>(&mut self, worker: &W, frame_id: u64, task: T) -> Result<(), InternalError> {
-        if task.memoize() {
-            let key = task.key();
-            match self.memo.get_mut(&key) {
-                Some(State::Done(v)) => {
-                    self.queue.push_back((frame_id, key, v.clone()));
-                    return Ok(());
-                }
-                Some(State::Pending { waiters, .. }) => {
-                    waiters.push(frame_id);
-                    return Ok(());
-                }
-                None => {
-                    self.memo.insert(key, State::Pending { owner: frame_id, waiters: Vec::new() });
+    fn schedule<W: Worker<T>>(&mut self, worker: &W, frame_id: u64, task: T) -> Result<(), Error<T>> {
+        if !task.memoize() {
+            return Ok(worker.submit(frame_id, task)?);
+        }
+
+        let key = task.key();
+        let enclosing = self.frames.get(&frame_id).and_then(|f| f.enclosing);
+        match self.memo.get_mut(&key) {
+            Some(State::Done(v)) => {
+                let v = v.clone();
+                self.queue.push_back((frame_id, key, Outcome::Value(v)));
+            }
+            Some(State::Failed) => {
+                self.queue.push_back((frame_id, key, Outcome::Failed));
+            }
+            Some(State::Pending { waiters, .. }) => {
+                waiters.push(frame_id);
+                if let Some(outer) = enclosing {
+                    if let Some(cycle) = self.find_path(key, outer) {
+                        return Err(Error::Cycle(cycle));
+                    }
+                    self.waits_for.entry(outer).or_default().push(key);
                 }
             }
+            None => {
+                self.memo.insert(key, State::Pending { owner: frame_id, waiters: Vec::new() });
+                if let Some(outer) = enclosing {
+                    self.waits_for.entry(outer).or_default().push(key);
+                }
+                worker.submit(frame_id, task)?;
+            }
         }
-        worker.submit(frame_id, task)
+        Ok(())
     }
 
     /// Handle a response from the worker.
@@ -205,31 +329,42 @@ impl<T: Task> Kernel<T> {
 
         match response {
             Response::Value(v) => {
-                self.queue.push_back((frame_id, key, v));
-                Ok(())
+                self.queue.push_back((frame_id, key, Outcome::Value(v)));
             }
             Response::Continuation(c) => {
                 let tail_call = !self.owns(frame_id, key)
                     && self.frames.get(&frame_id).is_some_and(|f| f.promise.root == key);
                 if tail_call {
                     let parent = self.frames.remove(&frame_id).unwrap().parent;
-                    self.add(worker, parent, c).map_err(Error::Internal)
+                    self.add(worker, parent, c)?;
                 } else {
-                    self.add(worker, Some((frame_id, key)), c).map_err(Error::Internal)
+                    self.add(worker, Some((frame_id, key)), c)?;
                 }
             }
-            Response::Error(e) => Err(Error::Job(e)),
+            Response::Error(e) => {
+                if !self.keep_going {
+                    return Err(Error::Jobs(vec![e]));
+                }
+                self.errors.push(e);
+                self.queue.push_back((frame_id, key, Outcome::Failed));
+            }
         }
+        Ok(())
     }
 
-    /// Deliver the final value of `key` in frame `frame_id`. Returns the result of the top-level frame, once known.
-    fn deliver<W: Worker<T>>(&mut self, worker: &W, frame_id: u64, key: T::Key, value: T::Value) -> Result<Option<T::Value>, InternalError> {
+    /// Deliver the outcome of `key` in frame `frame_id`. Returns the value of the top-level frame, once known.
+    fn deliver<W: Worker<T>>(&mut self, worker: &W, frame_id: u64, key: T::Key, outcome: Outcome<T>) -> Result<Option<T::Value>, Error<T>> {
         if self.owns(frame_id, key) {
-            if let Some(State::Pending { waiters, .. }) = self.memo.insert(key, State::Done(value.clone())) {
+            let state = match &outcome {
+                Outcome::Value(v) => State::Done(v.clone()),
+                Outcome::Failed => State::Failed,
+            };
+            if let Some(State::Pending { waiters, .. }) = self.memo.insert(key, state) {
                 for w in waiters {
-                    self.queue.push_back((w, key, value.clone()));
+                    self.queue.push_back((w, key, outcome.clone()));
                 }
             }
+            self.waits_for.remove(&key);
         }
 
         let Some(frame) = self.frames.get_mut(&frame_id) else { return Ok(None) };
@@ -237,36 +372,53 @@ impl<T: Task> Kernel<T> {
         // The root of a frame reports to the parent; other tasks report to their own frame.
         if key == frame.promise.root {
             let parent = frame.parent;
-            self.frames.remove(&frame_id);
-            return Ok(match parent {
-                None => Some(value),
-                Some((p, pk)) => {
-                    self.queue.push_back((p, pk, value));
-                    None
+            match outcome {
+                Outcome::Value(v) => {
+                    self.frames.remove(&frame_id);
+                    match parent {
+                        None => return Ok(Some(v)),
+                        Some((p, pk)) => self.queue.push_back((p, pk, Outcome::Value(v))),
+                    }
                 }
-            });
+                // The frame is kept, since other tasks in it may still be running.
+                Outcome::Failed => {
+                    if let Some((p, pk)) = parent {
+                        self.queue.push_back((p, pk, Outcome::Failed));
+                    }
+                }
+            }
+            return Ok(None);
         }
 
         let mut ready = Vec::new();
         if let Some(dependents) = frame.promise.inverse_deps.get(&key) {
             for dep in dependents {
-                let Some(task) = frame.promise.tasks.get_mut(dep) else { continue };
-                task.assoc(key, value.clone());
-                if task.ready() {
-                    ready.push(*dep);
+                match &outcome {
+                    Outcome::Value(v) => {
+                        let Some(task) = frame.promise.tasks.get_mut(dep) else { continue };
+                        task.assoc(key, v.clone());
+                        if task.ready() {
+                            ready.push(frame.promise.tasks.remove(dep).unwrap());
+                        }
+                    }
+                    // A task that depends on a failed task fails as well, without being run.
+                    Outcome::Failed => {
+                        if frame.promise.tasks.remove(dep).is_some() {
+                            self.queue.push_back((frame_id, *dep, Outcome::Failed));
+                        }
+                    }
                 }
             }
         }
-        let ready: Vec<T> = ready.iter().map(|dep| frame.promise.tasks.remove(dep).unwrap()).collect();
         for task in ready {
             self.schedule(worker, frame_id, task)?;
         }
         Ok(None)
     }
 
-    fn drain<W: Worker<T>>(&mut self, worker: &W) -> Result<Option<T::Value>, InternalError> {
-        while let Some((frame_id, key, value)) = self.queue.pop_front() {
-            if let Some(result) = self.deliver(worker, frame_id, key, value)? {
+    fn drain<W: Worker<T>>(&mut self, worker: &W) -> Result<Option<T::Value>, Error<T>> {
+        while let Some((frame_id, key, outcome)) = self.queue.pop_front() {
+            if let Some(result) = self.deliver(worker, frame_id, key, outcome)? {
                 return Ok(Some(result));
             }
         }
@@ -274,14 +426,14 @@ impl<T: Task> Kernel<T> {
     }
 
     fn run_frames<W: Worker<T>>(&mut self, worker: &W, promise: Box<Promise<T>>) -> Result<T::Value, Error<T>> {
-        self.add(worker, None, promise).map_err(Error::Internal)?;
-        if let Some(result) = self.drain(worker).map_err(Error::Internal)? {
+        self.add(worker, None, promise)?;
+        if let Some(result) = self.drain(worker)? {
             return Ok(result);
         }
 
         for (frame_id, key, response) in worker.listen() {
             self.respond(worker, frame_id, key, response)?;
-            if let Some(result) = self.drain(worker).map_err(Error::Internal)? {
+            if let Some(result) = self.drain(worker)? {
                 return Ok(result);
             }
         }
@@ -291,11 +443,18 @@ impl<T: Task> Kernel<T> {
 
     pub fn run<W: Worker<T>>(&mut self, worker: &W, promise: Box<Promise<T>>) -> Result<T::Value, Error<T>> {
         let result = self.run_frames(worker, promise);
-        if result.is_err() {
-            self.frames.clear();
-            self.queue.clear();
-            self.memo.retain(|_, state| matches!(state, State::Done(_)));
-        }
+        let errors = std::mem::take(&mut self.errors);
+        let result = match result {
+            Ok(_) | Err(Error::Internal(InternalError::NoResult)) if !errors.is_empty() => Err(Error::Jobs(errors)),
+            result => result,
+        };
+
+        // Whatever is still running is no longer needed.
+        worker.cancel();
+        self.frames.clear();
+        self.queue.clear();
+        self.waits_for.clear();
+        self.memo.retain(|_, state| matches!(state, State::Done(_)));
         result
     }
 }
@@ -304,33 +463,38 @@ impl<T: Task> Kernel<T> {
 Single Worker
 -------------
 
-The single worker has a single sender-receiver pair. When tasks are submitted they are immediately executed and the result is push on the channel. Since all work happens inside `submit`, `listen` doesn't need to block: if the channel is empty, nothing is left to do and the kernel can report that no result was found.
+The single worker has a single sender-receiver pair. When tasks are submitted they are immediately executed and the result is push on the channel. Since all work happens inside `submit`, `listen` doesn't need to block: if the channel is empty, nothing is left to do and the kernel can report that no result was found. Tasks are never running while the kernel is busy, so there is nothing to cancel: cancelling only throws away results that weren't read yet.
 
 ```rust
 //| file: src/noodles/single_worker.rs
-use super::task::{Task, Response, Worker, InternalError};
+use super::task::{Task, Response, Worker, InternalError, CancelToken};
 use crossbeam_channel::{Sender, Receiver, unbounded};
 
 pub struct SingleWorker<T: Task> {
     sender: Sender<(u64, T::Key, Response<T>)>,
-    receiver: Receiver<(u64, T::Key, Response<T>)>
+    receiver: Receiver<(u64, T::Key, Response<T>)>,
+    token: CancelToken,
 }
 
 impl<T: Task> SingleWorker<T> {
     pub fn new() -> Self {
         let (sender, receiver) = unbounded();
-        return SingleWorker{ sender, receiver }
+        return SingleWorker{ sender, receiver, token: CancelToken::new() }
     }
 }
 
 impl<T: Task> Worker<T> for SingleWorker<T> {
     fn submit(&self, frame_id: u64, task: T) -> Result<(), InternalError> {
         let key = task.key();
-        self.sender.send((frame_id, key, task.run())).map_err(|e| InternalError::SendError(e.to_string()))
+        self.sender.send((frame_id, key, task.run(&self.token))).map_err(|e| InternalError::SendError(e.to_string()))
     }
 
     fn listen(&self) -> impl Iterator<Item=(u64, T::Key, Response<T>)> {
         self.receiver.try_iter()
+    }
+
+    fn cancel(&self) {
+        while self.receiver.try_recv().is_ok() {}
     }
 }
 ```
@@ -344,25 +508,32 @@ The kernel needs to know when nothing is left to do, otherwise a graph that can'
 
 If a task panics, the thread catches the panic and sends it back with the response. The panic is then resumed on the thread that called `listen`, so a panicking task has the same effect as with the single worker.
 
-When the pool is dropped, the threads are told to stop: tasks that are still waiting in the channel are not run, but tasks that are running are allowed to finish.
+Every task is sent along with the cancel token that was current when it was submitted. To cancel, the pool triggers that token and replaces it with a fresh one for later tasks. Tasks that are still waiting in the channel are skipped when a thread picks them up; tasks that are running are told to stop through the token. Cancelling waits until every task in flight has reported back, and throws the responses away (including panics), so the next run starts clean. A task that never looks at its token will hold this up until it finishes.
+
+When the pool is dropped, all tasks are cancelled, and the threads stop.
 
 ```rust
 //| file: src/noodles/worker_pool.rs
-use std::cell::Cell;
+use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use super::task::{Task, Response, Worker, InternalError};
+use super::task::{Task, Response, Worker, InternalError, CancelToken};
 use crossbeam_channel::{Sender, Receiver, unbounded};
 
-type Outcome<T> = (u64, <T as Task>::Key, thread::Result<Response<T>>);
+enum Outcome<T: Task> {
+    Response(Response<T>),
+    Panic(Box<dyn Any + Send>),
+    Skipped,
+}
+
+type Message<T> = (u64, <T as Task>::Key, Outcome<T>);
 
 pub struct WorkerPool<T: Task> {
-    tasks: Option<Sender<(u64, T)>>,
-    results: Receiver<Outcome<T>>,
+    tasks: Option<Sender<(u64, T, CancelToken)>>,
+    results: Receiver<Message<T>>,
     in_flight: Cell<usize>,
-    shutdown: Arc<AtomicBool>,
+    token: RefCell<CancelToken>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -370,29 +541,37 @@ impl<T> WorkerPool<T>
 where T: Task + Send + 'static, T::Key: Send, T::Value: Send, T::Error: Send
 {
     pub fn new(n_threads: usize) -> Self {
-        let (task_sender, task_receiver) = unbounded::<(u64, T)>();
-        let (result_sender, result_receiver) = unbounded::<Outcome<T>>();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let (task_sender, task_receiver) = unbounded::<(u64, T, CancelToken)>();
+        let (result_sender, result_receiver) = unbounded::<Message<T>>();
 
         let threads = (0..n_threads.max(1)).map(|_| {
             let tasks = task_receiver.clone();
             let results = result_sender.clone();
-            let shutdown = shutdown.clone();
             thread::spawn(move || {
-                for (frame_id, task) in tasks.iter() {
-                    if shutdown.load(Ordering::Relaxed) {
-                        break;
-                    }
+                for (frame_id, task, token) in tasks.iter() {
                     let key = task.key();
-                    let response = panic::catch_unwind(AssertUnwindSafe(move || task.run()));
-                    if results.send((frame_id, key, response)).is_err() {
+                    let outcome = if token.is_cancelled() {
+                        Outcome::Skipped
+                    } else {
+                        match panic::catch_unwind(AssertUnwindSafe(|| task.run(&token))) {
+                            Ok(response) => Outcome::Response(response),
+                            Err(payload) => Outcome::Panic(payload),
+                        }
+                    };
+                    if results.send((frame_id, key, outcome)).is_err() {
                         break;
                     }
                 }
             })
         }).collect();
 
-        WorkerPool { tasks: Some(task_sender), results: result_receiver, in_flight: Cell::new(0), shutdown, threads }
+        WorkerPool {
+            tasks: Some(task_sender),
+            results: result_receiver,
+            in_flight: Cell::new(0),
+            token: RefCell::new(CancelToken::new()),
+            threads,
+        }
     }
 
     /// A pool with as many threads as the machine can run in parallel.
@@ -406,29 +585,38 @@ where T: Task + Send + 'static, T::Key: Send, T::Value: Send, T::Error: Send
 {
     fn submit(&self, frame_id: u64, task: T) -> Result<(), InternalError> {
         let sender = self.tasks.as_ref().ok_or(InternalError::SendError("worker pool is shut down".into()))?;
-        sender.send((frame_id, task)).map_err(|e| InternalError::SendError(e.to_string()))?;
+        let token = self.token.borrow().clone();
+        sender.send((frame_id, task, token)).map_err(|e| InternalError::SendError(e.to_string()))?;
         self.in_flight.set(self.in_flight.get() + 1);
         Ok(())
     }
 
     fn listen(&self) -> impl Iterator<Item=(u64, T::Key, Response<T>)> {
-        std::iter::from_fn(move || {
+        std::iter::from_fn(move || loop {
             if self.in_flight.get() == 0 {
                 return None;
             }
-            let (frame_id, key, response) = self.results.recv().ok()?;
+            let (frame_id, key, outcome) = self.results.recv().ok()?;
             self.in_flight.set(self.in_flight.get() - 1);
-            match response {
-                Ok(response) => Some((frame_id, key, response)),
-                Err(payload) => panic::resume_unwind(payload),
+            match outcome {
+                Outcome::Response(response) => return Some((frame_id, key, response)),
+                Outcome::Panic(payload) => panic::resume_unwind(payload),
+                Outcome::Skipped => continue,
             }
         })
+    }
+
+    fn cancel(&self) {
+        self.token.replace(CancelToken::new()).cancel();
+        while self.in_flight.get() > 0 && self.results.recv().is_ok() {
+            self.in_flight.set(self.in_flight.get() - 1);
+        }
     }
 }
 
 impl<T: Task> Drop for WorkerPool<T> {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.token.borrow().cancel();
         self.tasks.take();
         for thread in self.threads.drain(..) {
             let _ = thread.join();
@@ -440,19 +628,21 @@ impl<T: Task> Drop for WorkerPool<T> {
 Mock tasks
 ----------
 
-To test the engine, we have a mock task that computes on integers. Each task has a `u64` key, a list of dependencies and a function that takes the values of its dependencies (in order) and gives a `Response`. Since the function may return a continuation, we can have recursion. Tasks are not memoized, unless built with `.memoized()`.
+To test the engine, we have a mock task that computes on integers. Each task has a `u64` key, a list of dependencies and a function that takes the values of its dependencies (in order) and gives a `Response`. Since the function may return a continuation, we can have recursion. Tasks are not memoized, unless built with `.memoized()`. Tasks that want to look at the cancel token are built with `Mock::cancellable`.
 
 ```rust
 //| file: src/noodles/mock.rs
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use super::task::{Task, Promise, Response, Error, InternalError};
+use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+use super::task::{Task, Promise, Response, Error, InternalError, CancelToken};
 use super::kernel::Kernel;
 use super::single_worker::SingleWorker;
 use super::worker_pool::WorkerPool;
 
-type Func = Arc<dyn Fn(&[i64]) -> Response<Mock> + Send + Sync>;
+type Func = Arc<dyn Fn(&[i64], &CancelToken) -> Response<Mock> + Send + Sync>;
 
 struct Mock {
     key: u64,
@@ -464,6 +654,10 @@ struct Mock {
 
 impl Mock {
     fn new(key: u64, deps: &[u64], func: impl Fn(&[i64]) -> Response<Mock> + Send + Sync + 'static) -> Self {
+        Self::cancellable(key, deps, move |x, _| func(x))
+    }
+
+    fn cancellable(key: u64, deps: &[u64], func: impl Fn(&[i64], &CancelToken) -> Response<Mock> + Send + Sync + 'static) -> Self {
         Mock { key, deps: deps.to_vec(), args: HashMap::new(), memoize: false, func: Arc::new(func) }
     }
 
@@ -486,9 +680,9 @@ impl Task for Mock {
 
     fn memoize(&self) -> bool { self.memoize }
 
-    fn run(self) -> Response<Self> {
+    fn run(self, cancel: &CancelToken) -> Response<Self> {
         let args: Vec<i64> = self.deps.iter().map(|k| self.args[k]).collect();
-        (self.func)(&args)
+        (self.func)(&args, cancel)
     }
 
     fn assoc(&mut self, key: u64, value: i64) {
@@ -511,9 +705,7 @@ mod tests {
     fn eval(p: Box<Promise<Mock>>) -> Result<i64, Error<Mock>> {
         let worker = SingleWorker::new();
         let mut kernel = Kernel::new();
-        let result = kernel.run(&worker, p);
-        assert_eq!(kernel.frame_count(), 0);
-        result
+        kernel.run(&worker, p)
     }
 
     <<mock-tests>>
@@ -571,7 +763,7 @@ fn error() {
             Response::Value(x[0] / x[1])
         }),
     ]);
-    assert!(matches!(eval(p), Err(Error::Job(e)) if e == "division by zero"));
+    assert!(matches!(eval(p), Err(Error::Jobs(e)) if e == ["division by zero"]));
 }
 ```
 
@@ -718,7 +910,6 @@ fn memoization() {
     assert_eq!(kernel.run(&worker, promise(50, vec![fibonacci_memo(50, runs.clone())])).unwrap(), fib50);
     assert_eq!(runs.load(Ordering::Relaxed), 51);
     assert_eq!(kernel.memo_count(), 51);
-    assert_eq!(kernel.frame_count(), 0);
 
     assert_eq!(kernel.run(&worker, promise(50, vec![fibonacci_memo(50, runs.clone())])).unwrap(), fib50);
     assert_eq!(runs.load(Ordering::Relaxed), 51);
@@ -735,12 +926,11 @@ fn local_loop() {
     let mut kernel = Kernel::new();
     let n = 1_000_000;
     assert_eq!(kernel.run(&worker, promise(0, vec![sum_acc(0, n, 0)])).unwrap(), n * (n + 1) / 2);
-    assert_eq!(kernel.frame_count(), 0);
     assert_eq!(kernel.memo_count(), 0);
 }
 ```
 
-A memoized task that waits for itself never finishes.
+A memoized task that waits for itself is a cycle.
 
 ```rust
 //| id: mock-tests
@@ -750,7 +940,27 @@ fn cycle() {
         Mock::new(1, &[], |_| Response::Value(0)).memoized(),
         Mock::new(2, &[1], |x| Response::Value(x[0])),
     ]))).memoized();
-    assert!(matches!(eval(promise(1, vec![looping])), Err(Error::Internal(InternalError::NoResult))));
+    assert!(matches!(eval(promise(1, vec![looping])), Err(Error::Cycle(c)) if c == [1]));
+}
+```
+
+A cycle can also go through several memoized tasks: here task `1` needs `2`, which needs `1` again.
+
+```rust
+//| id: mock-memo
+fn needs(key: u64, dep: u64) -> Mock {
+    Mock::new(key, &[], move |_| Response::Continuation(promise(SUM, vec![
+        needs(dep, key),
+        Mock::new(SUM, &[dep], |x| Response::Value(x[0])),
+    ]))).memoized()
+}
+```
+
+```rust
+//| id: mock-tests
+#[test]
+fn indirect_cycle() {
+    assert!(matches!(eval(promise(1, vec![needs(1, 2)])), Err(Error::Cycle(c)) if c == [1, 2]));
 }
 ```
 
@@ -763,9 +973,7 @@ The same computations give the same answers on a worker pool. Memoization still 
 fn eval_pool(p: Box<Promise<Mock>>) -> Result<i64, Error<Mock>> {
     let worker = WorkerPool::new(4);
     let mut kernel = Kernel::new();
-    let result = kernel.run(&worker, p);
-    assert_eq!(kernel.frame_count(), 0);
-    result
+    kernel.run(&worker, p)
 }
 
 #[test]
@@ -791,7 +999,7 @@ fn pool_error() {
         Mock::new(1, &[], |_| Response::Error("failed".into())),
         Mock::new(2, &[1], |x| Response::Value(x[0])),
     ]);
-    assert!(matches!(eval_pool(p), Err(Error::Job(e)) if e == "failed"));
+    assert!(matches!(eval_pool(p), Err(Error::Jobs(e)) if e == ["failed"]));
     assert!(matches!(eval_pool(promise(2, vec![binop(2, 1, 3, |a, b| a + b)])), Err(Error::Internal(InternalError::NoResult))));
 }
 ```
@@ -823,5 +1031,94 @@ A panic in a task is passed on to the caller.
 #[should_panic(expected = "boom")]
 fn pool_panic() {
     let _ = eval_pool(promise(1, vec![Mock::new(1, &[], |_| panic!("boom"))]));
+}
+```
+```
+
+### Failure and cancellation
+
+When a task fails, the kernel stops by default. Here an error happens next to a memoized Fibonacci computation. When we keep going, the Fibonacci numbers are still computed and end up in the memo, even though the run as a whole fails. Without keeping going, the run stops before that.
+
+```rust
+//| id: mock-tests
+fn failing_next_to_fibonacci() -> Box<Promise<Mock>> {
+    promise(SUM, vec![
+        Mock::new(100, &[], |_| Response::Error("failed".into())),
+        fibonacci_memo(10, Arc::new(AtomicUsize::new(0))),
+        binop(SUM, 100, 10, |a, b| a + b),
+    ])
+}
+
+#[test]
+fn keep_going() {
+    let worker = SingleWorker::new();
+    let mut kernel = Kernel::new().keep_going();
+    assert!(matches!(kernel.run(&worker, failing_next_to_fibonacci()), Err(Error::Jobs(e)) if e == ["failed"]));
+    assert_eq!(kernel.memo_count(), 11);
+
+    let mut kernel = Kernel::new();
+    assert!(matches!(kernel.run(&worker, failing_next_to_fibonacci()), Err(Error::Jobs(e)) if e == ["failed"]));
+    assert!(kernel.memo_count() < 11);
+}
+```
+
+All errors are collected, also when they happen deep down in a continuation.
+
+```rust
+//| id: mock-tests
+#[test]
+fn keep_going_collects_errors() {
+    let deep_error = Mock::new(2, &[], |_| Response::Continuation(promise(1, vec![
+        Mock::new(1, &[], |_| Response::Error("deep".into())),
+    ])));
+    let p = promise(3, vec![
+        Mock::new(1, &[], |_| Response::Error("shallow".into())),
+        deep_error,
+        binop(3, 1, 2, |a, b| a + b),
+    ]);
+    let worker = SingleWorker::new();
+    let mut kernel = Kernel::new().keep_going();
+    let Err(Error::Jobs(mut errors)) = kernel.run(&worker, p) else { panic!("expected errors") };
+    errors.sort();
+    assert_eq!(errors, ["deep", "shallow"]);
+}
+```
+
+On the worker pool, an error cancels the tasks that are still running. Task `2` would run for ten seconds, unless it notices it is cancelled. The barrier makes sure that task `2` is already running when task `1` fails.
+
+```rust
+//| id: mock-tests
+#[test]
+fn pool_cancel() {
+    let barrier = Arc::new(Barrier::new(2));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let p = {
+        let (b1, b2) = (barrier.clone(), barrier.clone());
+        let cancelled = cancelled.clone();
+        promise(3, vec![
+            Mock::new(1, &[], move |_| {
+                b1.wait();
+                Response::Error("failed".into())
+            }),
+            Mock::cancellable(2, &[], move |_, token| {
+                b2.wait();
+                let start = Instant::now();
+                while start.elapsed() < Duration::from_secs(10) {
+                    if token.is_cancelled() {
+                        cancelled.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Response::Value(0)
+            }),
+            binop(3, 1, 2, |a, b| a + b),
+        ])
+    };
+
+    let start = Instant::now();
+    assert!(matches!(eval_pool(p), Err(Error::Jobs(e)) if e == ["failed"]));
+    assert!(cancelled.load(Ordering::Relaxed));
+    assert!(start.elapsed() < Duration::from_secs(5));
 }
 ```
