@@ -14,8 +14,18 @@ This chapter builds Brei on top of the [engine](./engine.md): the tasks that Bre
 //! Brei tasks, running on the engine in `noodles`.
 
 mod target;
+mod rule;
+mod db;
+mod exec;
+mod job;
+
+#[cfg(test)]
+mod tests;
 
 pub use target::{Target, VarType, TargetId, Targets, Key, EmptyTarget, TypeMismatch};
+pub use rule::{Rule, RuleError, Runner, Value, Failure, default_runners};
+pub use db::TaskDb;
+pub use job::{Job, build};
 ```
 
 Targets
@@ -83,6 +93,13 @@ fn normalize(path: &Path) -> PathBuf {
     if normal.as_os_str().is_empty() { PathBuf::from(".") } else { normal }
 }
 
+impl Target {
+    /// A path target, normalized.
+    pub fn path(path: impl AsRef<Path>) -> Self {
+        Target::Path(normalize(path.as_ref()))
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct EmptyTarget;
 
@@ -100,7 +117,7 @@ impl FromStr for Target {
         } else if let Some(name) = wrapped(s, "listvar") {
             Target::Variable(name.to_string(), VarType::List)
         } else {
-            Target::Path(normalize(Path::new(s)))
+            Target::path(s)
         })
     }
 }
@@ -344,5 +361,854 @@ fn keys() {
     let key: Key = targets.intern(&target("a.txt")).unwrap().into();
     assert!(key.is_global());
     assert!(!Key::Local(0).is_global());
+}
+```
+
+Rules
+-----
+
+A *rule* says how to create a set of targets from a set of dependencies. This is what the Python version calls a `Task`; here that name is taken by the engine. A rule has:
+
+- `creates`, the targets it creates, and `requires`, the targets it needs;
+- optionally a `name`, which makes the rule available as the phony target `#name`;
+- something to run: a `script`, optionally with a `runner`, or a `path` to a script file, which needs a runner. Without a runner, every line of the script is a command. With a runner, the script is written to a file, and the runner is called with that file;
+- optionally `stdin` and `stdout`, which redirect standard input and output to a file or variable. Standard input can only come from a file or a scalar variable; standard output can go to a file, a scalar variable or a list variable;
+- a `description`, used for logging, and `force`, to always run the rule.
+
+The targets in `stdout` and `name`, and the dependencies in `stdin` and `path`, are added to `creates` and `requires` when the rule is added to the database. A rule that doesn't create any file is always run, so that is the case for rules that only have phony or variable targets.
+
+```rust
+//| file: src/tasks/rule.rs
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::path::PathBuf;
+use super::target::{Target, VarType, TypeMismatch};
+
+<<rule-value>>
+<<rule-failure>>
+<<rule-runner>>
+<<rule-rule>>
+```
+
+### Values
+
+The engine passes values from one task to the next. For a file or phony target there's nothing to pass: whatever a rule produced is on disk. Variables carry a string or a list of strings.
+
+```rust
+//| id: rule-value
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Value {
+    Nothing,
+    Scalar(String),
+    List(Vec<String>),
+}
+```
+
+### Failures
+
+When a rule fails, the engine collects the error. These need to be `Clone`, so we store messages instead of the original errors.
+
+```rust
+//| id: rule-failure
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+    Missing(Target),
+    UnknownRunner(String),
+    InvalidScript(String),
+    Template(String),
+    Io(String),
+    Command { command: String, code: Option<i32> },
+    NotAchieved(Vec<Target>),
+    Cancelled,
+}
+
+impl From<std::io::Error> for Failure {
+    fn from(e: std::io::Error) -> Self {
+        Failure::Io(e.to_string())
+    }
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Failure::Missing(t) => write!(f, "missing dependency: `{t}`"),
+            Failure::UnknownRunner(r) => write!(f, "unknown runner: `{r}`"),
+            Failure::InvalidScript(line) => write!(f, "can't parse command: `{line}`"),
+            Failure::Template(msg) => write!(f, "error in template: {msg}"),
+            Failure::Io(msg) => write!(f, "{msg}"),
+            Failure::Command { command, code: Some(code) } => write!(f, "`{command}` failed with exit code {code}"),
+            Failure::Command { command, code: None } => write!(f, "`{command}` was killed"),
+            Failure::NotAchieved(targets) => {
+                let targets: Vec<String> = targets.iter().map(|t| format!("`{t}`")).collect();
+                write!(f, "rule didn't create {}", targets.join(", "))
+            }
+            Failure::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+```
+
+### Runners
+
+A runner is a command that runs a script. Its arguments are template strings, where `${script}` is replaced with the path of the script. Brei comes with runners for Python and Bash; a program can add more.
+
+```rust
+//| id: rule-runner
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Runner {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+pub fn default_runners() -> HashMap<String, Runner> {
+    let runner = |command: &str| Runner { command: command.into(), args: vec!["${script}".into()] };
+    HashMap::from([
+        ("python".into(), runner("python")),
+        ("bash".into(), runner("bash")),
+    ])
+}
+```
+
+### The rule
+
+The digest of a rule is a hash of its script. It is stored in the history after the rule was run, so that we notice when the script changed. We use MD5, like the Python version, to be able to read the same history files. Rules that run a script file don't have a digest; for those, the script file is a dependency.
+
+```rust
+//| id: rule-rule
+#[derive(Clone, Debug, Default)]
+pub struct Rule {
+    pub creates: Vec<Target>,
+    pub requires: Vec<Target>,
+    pub name: Option<String>,
+    pub runner: Option<String>,
+    pub path: Option<PathBuf>,
+    pub script: Option<String>,
+    pub stdin: Option<Target>,
+    pub stdout: Option<Target>,
+    pub description: Option<String>,
+    pub force: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RuleError {
+    TypeMismatch(TypeMismatch),
+    Duplicate(Target),
+    Invalid(String),
+}
+
+impl From<TypeMismatch> for RuleError {
+    fn from(e: TypeMismatch) -> Self {
+        RuleError::TypeMismatch(e)
+    }
+}
+
+impl fmt::Display for RuleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RuleError::TypeMismatch(e) => write!(f, "{e}"),
+            RuleError::Duplicate(t) => write!(f, "`{t}` is created by more than one rule"),
+            RuleError::Invalid(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+fn dedup(targets: &mut Vec<Target>) {
+    let mut seen = HashSet::new();
+    targets.retain(|t| seen.insert(t.clone()));
+}
+
+impl Rule {
+    pub fn target_paths(&self) -> impl Iterator<Item=&PathBuf> {
+        self.creates.iter().filter_map(|t| match t { Target::Path(p) => Some(p), _ => None })
+    }
+
+    pub fn dependency_paths(&self) -> impl Iterator<Item=&PathBuf> {
+        self.requires.iter().filter_map(|t| match t { Target::Path(p) => Some(p), _ => None })
+    }
+
+    pub fn digest(&self) -> Option<String> {
+        self.script.as_ref().map(|s| format!("{:x}", md5::compute(s)))
+    }
+
+    pub fn always_run(&self) -> bool {
+        self.force || self.target_paths().next().is_none()
+    }
+
+    /// Add implied targets and dependencies, and check that the rule makes sense.
+    pub(super) fn complete(mut self) -> Result<Rule, RuleError> {
+        if let Some(name) = &self.name {
+            self.creates.push(Target::Phony(name.clone()));
+        }
+        if let Some(stdin) = &self.stdin {
+            self.requires.push(stdin.clone());
+        }
+        if let Some(path) = &self.path {
+            self.requires.push(Target::path(path));
+        }
+        if let Some(stdout) = &self.stdout {
+            self.creates.push(stdout.clone());
+        }
+        dedup(&mut self.creates);
+        dedup(&mut self.requires);
+
+        let invalid = |msg: String| Err(RuleError::Invalid(msg));
+        match &self.stdin {
+            None | Some(Target::Path(_)) | Some(Target::Variable(_, VarType::Scalar)) => {}
+            Some(t) => return invalid(format!("`stdin` can't be `{t}`")),
+        }
+        if let Some(t @ Target::Phony(_)) = &self.stdout {
+            return invalid(format!("`stdout` can't be `{t}`"));
+        }
+        match (&self.runner, &self.script, &self.path) {
+            (_, Some(_), Some(_)) => invalid("a rule can't have both `script` and `path`".into()),
+            (None, None, Some(_)) => invalid("a rule with a `path` needs a `runner`".into()),
+            (Some(_), None, None) => invalid("a rule with a `runner` needs a `script` or `path`".into()),
+            (None, Some(script), None) if script.lines().count() > 1 && self.stdin.is_some() =>
+                invalid("a script of more than one line can't have `stdin`, use a runner".into()),
+            _ => Ok(self),
+        }
+    }
+}
+```
+
+The task database
+-----------------
+
+The task database holds everything the tasks share while running: the table of targets, the rules, and which rule creates which target. Commands run in the `root` directory, and paths are relative to it.
+
+The history remembers the digest of the rule that last created each file. It is shared by all tasks, which may run on different threads, so it is behind a `Mutex`. Reading and writing the history to disk comes later.
+
+Rules are added before running anything, so adding takes a `&mut` reference; once all rules are in, the database goes into an `Arc` and is shared with the tasks. A target can only be created by one rule.
+
+```rust
+//| file: src/tasks/db.rs
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use super::rule::{Rule, RuleError, Runner, default_runners};
+use super::target::{Target, TargetId, Targets};
+
+pub(super) struct Entry {
+    pub(super) rule: Rule,
+    pub(super) creates: Vec<TargetId>,
+    pub(super) requires: Vec<TargetId>,
+    pub(super) stdin: Option<TargetId>,
+}
+
+pub struct TaskDb {
+    pub root: PathBuf,
+    pub targets: Targets,
+    pub runners: HashMap<String, Runner>,
+    pub force_run: bool,
+    rules: Vec<Entry>,
+    index: HashMap<TargetId, usize>,
+    pub(super) history: Mutex<HashMap<PathBuf, String>>,
+}
+
+impl TaskDb {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        TaskDb {
+            root: root.into(),
+            targets: Targets::new(),
+            runners: default_runners(),
+            force_run: false,
+            rules: Vec::new(),
+            index: HashMap::new(),
+            history: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn add(&mut self, rule: Rule) -> Result<(), RuleError> {
+        let rule = rule.complete()?;
+        let intern = |ts: &[Target]| ts.iter().map(|t| self.targets.intern(t)).collect::<Result<Vec<_>, _>>();
+        let creates = intern(&rule.creates)?;
+        let requires = intern(&rule.requires)?;
+        if let Some((t, _)) = rule.creates.iter().zip(&creates).find(|(_, id)| self.index.contains_key(id)) {
+            return Err(RuleError::Duplicate(t.clone()));
+        }
+        let stdin = match &rule.stdin {
+            Some(t @ Target::Variable(..)) => self.targets.lookup(t),
+            _ => None,
+        };
+
+        let n = self.rules.len();
+        for id in &creates {
+            self.index.insert(*id, n);
+        }
+        self.rules.push(Entry { rule, creates, requires, stdin });
+        Ok(())
+    }
+
+    pub(super) fn rule_for(&self, target: TargetId) -> Option<usize> {
+        self.index.get(&target).copied()
+    }
+
+    pub(super) fn entry(&self, n: usize) -> &Entry {
+        &self.rules[n]
+    }
+}
+```
+
+Running a rule
+--------------
+
+### Is a rule out of date?
+
+A rule needs to run when one of its target files is missing, is older than one of the files it depends on, or was created by a different version of the script (according to the history).
+
+```rust
+//| file: src/tasks/exec.rs
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, SystemTime};
+use tempfile::{NamedTempFile, TempPath};
+use crate::noodles::task::CancelToken;
+use crate::template_strings::{dollar, Env, Format};
+use super::db::TaskDb;
+use super::rule::{Rule, Value, Failure};
+use super::target::{Target, VarType};
+
+impl TaskDb {
+    fn modified(&self, path: &Path) -> Result<SystemTime, Failure> {
+        Ok(fs::metadata(self.root.join(path))?.modified()?)
+    }
+
+    pub fn needs_run(&self, rule: &Rule) -> Result<bool, Failure> {
+        if rule.target_paths().any(|p| !self.root.join(p).exists()) {
+            return Ok(true);
+        }
+        let targets = rule.target_paths().map(|p| self.modified(p)).collect::<Result<Vec<_>, _>>()?;
+        let deps = rule.dependency_paths().map(|p| self.modified(p)).collect::<Result<Vec<_>, _>>()?;
+        if targets.iter().any(|t| deps.iter().any(|d| t < d)) {
+            return Ok(true);
+        }
+        let digest = rule.digest();
+        let history = self.history.lock().unwrap();
+        Ok(rule.target_paths().any(|p| history.get(p) != digest.as_ref()))
+    }
+
+    fn remember(&self, rule: &Rule) {
+        let mut history = self.history.lock().unwrap();
+        for p in rule.target_paths() {
+            match rule.digest() {
+                Some(digest) => history.insert(p.clone(), digest),
+                None => history.remove(p),
+            };
+        }
+    }
+
+    /// Targets of a rule that failed may be written partially, so we forget them, and they are built again next time.
+    fn forget(&self, rule: &Rule) {
+        let mut history = self.history.lock().unwrap();
+        for p in rule.target_paths() {
+            history.remove(p);
+        }
+    }
+
+    <<exec-commands>>
+    <<exec-execute>>
+}
+
+<<exec-run-command>>
+```
+
+### Commands
+
+Without a runner, each line of the script is a command, split into arguments like a shell would. Note that this is not a shell: there are no pipes, redirections or variables. With a runner, the script is written to a temporary file (unless the rule has a `path`), and there is a single command: the runner with its arguments. The temporary file is kept until the rule is done.
+
+```rust
+//| id: exec-commands
+fn commands(&self, rule: &Rule, script_file: &mut Option<TempPath>) -> Result<Vec<Vec<String>>, Failure> {
+    let Some(name) = &rule.runner else {
+        let script = rule.script.as_deref().unwrap_or("");
+        return script.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| shlex::split(line).ok_or_else(|| Failure::InvalidScript(line.to_string())))
+            .collect();
+    };
+
+    let runner = self.runners.get(name).ok_or_else(|| Failure::UnknownRunner(name.clone()))?;
+    let path: PathBuf = match (&rule.path, &rule.script) {
+        (Some(path), _) => self.root.join(path),
+        (None, Some(script)) => {
+            let mut file = NamedTempFile::new()?;
+            file.write_all(script.as_bytes())?;
+            // Close the file, so that it can be opened by the runner on any platform.
+            let temp = file.into_temp_path();
+            let path = temp.to_path_buf();
+            *script_file = Some(temp);
+            path
+        }
+        (None, None) => return Err(Failure::InvalidScript(String::new())),
+    };
+
+    let mut env = Env::new();
+    env.insert("script".into(), path.to_string_lossy().into_owned());
+    let args = runner.args.iter()
+        .map(|arg| dollar(arg.as_str()).format(&env).map_err(|e| Failure::Template(format!("{e:?}"))))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(vec![std::iter::once(runner.command.clone()).chain(args).collect()])
+}
+```
+
+### Executing
+
+To execute a rule, we first check if it needs to run at all. A rule without a script (only dependencies) is done once its dependencies are.
+
+Standard input comes from a file, from the value of a variable, or is empty. Unlike the Python version, a command never reads from the terminal: with many commands running at the same time that would be confusing. Standard output goes to a file, is captured into a variable, or goes to the terminal. Standard error always goes to the terminal. If there are several commands, they share the same input and output files.
+
+After running, we store the digest in the history, and check that the rule actually did what it promised: if it still needs to run, something is wrong. The value of a rule is its standard output, if it was captured: trimmed for a scalar, and split into non-empty lines for a list.
+
+```rust
+//| id: exec-execute
+pub(super) fn execute(&self, rule: &Rule, input: Option<&str>, cancel: &CancelToken) -> Result<Value, Failure> {
+    if !(self.force_run || rule.always_run()) && !self.needs_run(rule)? {
+        return Ok(Value::Nothing);
+    }
+    if rule.runner.is_none() && rule.script.is_none() {
+        return Ok(Value::Nothing);
+    }
+
+    let mut script_file = None;
+    let commands = self.commands(rule, &mut script_file)?;
+    let stdin = match &rule.stdin {
+        Some(Target::Path(p)) => Some(File::open(self.root.join(p))?),
+        _ => None,
+    };
+    let stdout = match &rule.stdout {
+        Some(Target::Path(p)) => Some(File::create(self.root.join(p))?),
+        _ => None,
+    };
+    let capture = matches!(rule.stdout, Some(Target::Variable(..)));
+
+    let mut output = Vec::new();
+    for command in &commands {
+        let mut cmd = Command::new(&command[0]);
+        cmd.args(&command[1..]).current_dir(&self.root).stderr(Stdio::inherit());
+        cmd.stdin(match &stdin {
+            Some(file) => Stdio::from(file.try_clone()?),
+            None if input.is_some() => Stdio::piped(),
+            None => Stdio::null(),
+        });
+        cmd.stdout(match &stdout {
+            Some(file) => Stdio::from(file.try_clone()?),
+            None if capture => Stdio::piped(),
+            None => Stdio::inherit(),
+        });
+        match run_command(cmd, &command.join(" "), input, cancel) {
+            Ok(out) => output.extend(out),
+            Err(failure) => {
+                self.forget(rule);
+                return Err(failure);
+            }
+        }
+    }
+    drop(script_file);
+
+    self.remember(rule);
+    if self.needs_run(rule)? {
+        return Err(Failure::NotAchieved(rule.creates.clone()));
+    }
+
+    let text = String::from_utf8_lossy(&output);
+    Ok(match &rule.stdout {
+        Some(Target::Variable(_, VarType::List)) =>
+            Value::List(text.lines().filter(|l| !l.is_empty()).map(String::from).collect()),
+        Some(Target::Variable(_, VarType::Scalar)) => Value::Scalar(text.trim().to_string()),
+        _ => Value::Nothing,
+    })
+}
+```
+
+### Running a command
+
+Input and captured output go through pipes. Each pipe gets its own thread, so that a command that writes a lot of output before reading its input can't block. Meanwhile, we poll the command to see if it has finished, and check the cancel token. A cancelled command is killed.
+
+Killing only stops the command itself. If the command started processes of its own, like a runner script that calls other programs, those keep running. Fixing that needs process groups, which is platform specific.
+
+```rust
+//| id: exec-run-command
+fn run_command(mut cmd: Command, display: &str, input: Option<&str>, cancel: &CancelToken) -> Result<Vec<u8>, Failure> {
+    let mut child = cmd.spawn().map_err(|e| Failure::Io(format!("can't run `{display}`: {e}")))?;
+
+    let writer = match (child.stdin.take(), input) {
+        (Some(mut stdin), Some(data)) => {
+            let data = data.as_bytes().to_vec();
+            // The command may exit without reading all of its input; that's fine.
+            Some(thread::spawn(move || { let _ = stdin.write_all(&data); }))
+        }
+        _ => None,
+    };
+    let reader = child.stdout.take().map(|mut stdout| thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stdout.read_to_end(&mut buffer).map(|_| buffer)
+    }));
+
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Failure::Cancelled);
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
+    let output = match reader {
+        Some(reader) => reader.join().expect("reader thread panicked")?,
+        None => Vec::new(),
+    };
+    if !status.success() {
+        return Err(Failure::Command { command: display.to_string(), code: status.code() });
+    }
+    Ok(output)
+}
+```
+
+Engine tasks
+------------
+
+Now we can put rules on the engine. There are three kinds of jobs:
+
+- `Build` a target, with the target as its key. This job is memoized, so every target is built at most once. If no rule creates the target, it should be a file that already exists. Otherwise, the result is a continuation: building each dependency, followed by running the rule;
+- `Run` a rule, once its dependencies are built. This has a local key, and receives the values of all dependencies. The only value it uses is that of a variable on `stdin`;
+- `Alias` a target to another. A rule can create several targets, but we want to run it only once. So the first target is the main one: building any other target of the rule gives a continuation that builds the main target, followed by an alias that passes on its value.
+
+```rust
+//| file: src/tasks/job.rs
+use std::collections::HashMap;
+use std::sync::Arc;
+use crate::noodles::task::{Task, Response, Promise, CancelToken, Error, Worker};
+use crate::noodles::kernel::Kernel;
+use super::db::TaskDb;
+use super::rule::{Value, Failure};
+use super::target::{Target, TargetId, Key};
+
+pub enum Job {
+    Build { db: Arc<TaskDb>, target: TargetId },
+    Run { db: Arc<TaskDb>, rule: usize, deps: Vec<TargetId>, args: HashMap<TargetId, Value> },
+    Alias { target: TargetId, value: Option<Value> },
+}
+
+impl Job {
+    pub fn build(db: &Arc<TaskDb>, target: TargetId) -> Self {
+        Job::Build { db: db.clone(), target }
+    }
+}
+
+fn build_target(db: Arc<TaskDb>, target: TargetId) -> Response<Job> {
+    let Some(n) = db.rule_for(target) else {
+        return match db.targets.get(target) {
+            Target::Path(p) if db.root.join(&p).exists() => Response::Value(Value::Nothing),
+            t => Response::Error(Failure::Missing(t)),
+        };
+    };
+
+    let entry = db.entry(n);
+    let main = entry.creates[0];
+    let tasks = if main != target {
+        vec![Job::build(&db, main), Job::Alias { target: main, value: None }]
+    } else {
+        let mut tasks: Vec<Job> = entry.requires.iter().map(|dep| Job::build(&db, *dep)).collect();
+        tasks.push(Job::Run { db: db.clone(), rule: n, deps: entry.requires.clone(), args: HashMap::new() });
+        tasks
+    };
+    Response::Continuation(Box::new(Promise::new(Key::Local(0), tasks)))
+}
+
+fn run_rule(db: Arc<TaskDb>, n: usize, args: HashMap<TargetId, Value>, cancel: &CancelToken) -> Response<Job> {
+    let entry = db.entry(n);
+    let input = entry.stdin.map(|id| match args.get(&id) {
+        Some(Value::Scalar(s)) => s.as_str(),
+        _ => "",
+    });
+    match db.execute(&entry.rule, input, cancel) {
+        Ok(value) => Response::Value(value),
+        Err(failure) => Response::Error(failure),
+    }
+}
+
+impl Task for Job {
+    type Value = Value;
+    type Key = Key;
+    type Error = Failure;
+
+    fn key(&self) -> Key {
+        match self {
+            Job::Build { target, .. } => Key::Target(*target),
+            Job::Run { .. } | Job::Alias { .. } => Key::Local(0),
+        }
+    }
+
+    fn dependencies(&self) -> impl Iterator<Item=Key> {
+        let deps: Vec<Key> = match self {
+            Job::Build { .. } => Vec::new(),
+            Job::Run { deps, .. } => deps.iter().map(|d| Key::Target(*d)).collect(),
+            Job::Alias { target, .. } => vec![Key::Target(*target)],
+        };
+        deps.into_iter()
+    }
+
+    fn memoize(&self) -> bool {
+        self.key().is_global()
+    }
+
+    fn run(self, cancel: &CancelToken) -> Response<Self> {
+        match self {
+            Job::Build { db, target } => build_target(db, target),
+            Job::Run { db, rule, args, .. } => run_rule(db, rule, args, cancel),
+            Job::Alias { value, .. } => Response::Value(value.expect("alias is ready")),
+        }
+    }
+
+    fn assoc(&mut self, key: Key, value: Value) {
+        match (self, key) {
+            (Job::Run { args, .. }, Key::Target(id)) => { args.insert(id, value); }
+            (Job::Alias { value: v, .. }, _) => *v = Some(value),
+            _ => {}
+        }
+    }
+
+    fn ready(&self) -> bool {
+        match self {
+            Job::Build { .. } => true,
+            Job::Run { deps, args, .. } => args.len() == deps.len(),
+            Job::Alias { value, .. } => value.is_some(),
+        }
+    }
+}
+
+/// Build a target, giving its value.
+pub fn build<W: Worker<Job>>(db: &Arc<TaskDb>, kernel: &mut Kernel<Job>, worker: &W, target: TargetId) -> Result<Value, Error<Job>> {
+    kernel.run(worker, Box::new(Promise::new(Key::Target(target), [Job::build(db, target)])))
+}
+```
+
+Tests
+-----
+
+The tests run real commands in a temporary directory, so they need `bash`, `cat`, `tr` and a few other common Unix tools.
+
+```rust
+//| file: src/tasks/tests.rs
+use std::fs;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
+use tempfile::TempDir;
+use crate::noodles::kernel::Kernel;
+use crate::noodles::single_worker::SingleWorker;
+use crate::noodles::worker_pool::WorkerPool;
+use crate::noodles::task::Error;
+use super::*;
+
+fn target(s: &str) -> Target {
+    s.parse().unwrap()
+}
+
+fn targets(ts: &[&str]) -> Vec<Target> {
+    ts.iter().map(|t| target(t)).collect()
+}
+
+fn rule(creates: &[&str], requires: &[&str], script: &str) -> Rule {
+    Rule { creates: targets(creates), requires: targets(requires), script: Some(script.into()), ..Default::default() }
+}
+
+fn bash(creates: &[&str], requires: &[&str], script: &str) -> Rule {
+    Rule { runner: Some("bash".into()), ..rule(creates, requires, script) }
+}
+
+fn run(db: &Arc<TaskDb>, t: &str) -> Result<Value, Error<Job>> {
+    let id = db.targets.intern(&target(t)).unwrap();
+    build(db, &mut Kernel::new(), &SingleWorker::new(), id)
+}
+
+fn read(dir: &TempDir, path: &str) -> String {
+    fs::read_to_string(dir.path().join(path)).unwrap()
+}
+
+fn failures(result: Result<Value, Error<Job>>) -> Vec<Failure> {
+    match result {
+        Err(Error::Jobs(failures)) => failures,
+        Err(e) => panic!("expected failures, got {e:?}"),
+        Ok(v) => panic!("expected failures, got {v:?}"),
+    }
+}
+
+<<task-tests>>
+```
+
+A simple rule, and a chain of rules. The second time, nothing needs to be done. When a dependency changes, only the rules that depend on it run again.
+
+```rust
+//| id: task-tests
+#[test]
+fn hello() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(Rule { stdout: Some(target("hello.txt")), ..rule(&[], &[], "echo hello") }).unwrap();
+    assert_eq!(run(&Arc::new(db), "hello.txt").unwrap(), Value::Nothing);
+    assert_eq!(read(&dir, "hello.txt"), "hello\n");
+}
+
+#[test]
+fn up_to_date() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(bash(&["a.txt"], &[], "echo a >> log.txt; echo a > a.txt")).unwrap();
+    db.add(bash(&["b.txt"], &["a.txt"], "echo b >> log.txt; cat a.txt > b.txt")).unwrap();
+    let db = Arc::new(db);
+
+    run(&db, "b.txt").unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\nb\n");
+    assert_eq!(read(&dir, "b.txt"), "a\n");
+
+    run(&db, "b.txt").unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\nb\n");
+
+    // make `b.txt` older than `a.txt`
+    let earlier = SystemTime::now() - Duration::from_secs(10);
+    fs::File::options().write(true).open(dir.path().join("b.txt")).unwrap().set_modified(earlier).unwrap();
+    run(&db, "b.txt").unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\nb\nb\n");
+}
+```
+
+Variables pass values between rules, through standard output and input.
+
+```rust
+//| id: task-tests
+#[test]
+fn variables() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(Rule { stdout: Some(target("var(greeting)")), ..rule(&[], &[], "echo hello world") }).unwrap();
+    db.add(Rule {
+        stdin: Some(target("var(greeting)")),
+        stdout: Some(target("shout.txt")),
+        ..rule(&[], &[], "tr a-z A-Z")
+    }).unwrap();
+    db.add(Rule { stdout: Some(target("listvar(files)")), ..rule(&[], &[], r"printf 'a\nb\n\nc\n'") }).unwrap();
+    let db = Arc::new(db);
+
+    assert_eq!(run(&db, "var(greeting)").unwrap(), Value::Scalar("hello world".into()));
+    run(&db, "shout.txt").unwrap();
+    assert_eq!(read(&dir, "shout.txt"), "HELLO WORLD");
+    assert_eq!(run(&db, "listvar(files)").unwrap(), Value::List(vec!["a".into(), "b".into(), "c".into()]));
+}
+```
+
+A rule that creates several targets runs once, even when its targets are built in parallel. Its value can be reached through any of its targets.
+
+```rust
+//| id: task-tests
+#[test]
+fn several_targets() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(bash(&["a.txt", "b.txt", "c.txt"], &[], "echo run >> log.txt; touch a.txt b.txt c.txt")).unwrap();
+    db.add(Rule { name: Some("all".into()), requires: targets(&["a.txt", "b.txt", "c.txt"]), ..Default::default() }).unwrap();
+    db.add(Rule { name: Some("answer".into()), stdout: Some(target("var(answer)")), ..rule(&[], &[], "echo 42") }).unwrap();
+    let db = Arc::new(db);
+
+    let id = db.targets.lookup(&target("#all")).unwrap();
+    build(&db, &mut Kernel::new(), &WorkerPool::new(4), id).unwrap();
+    assert_eq!(read(&dir, "log.txt"), "run\n");
+
+    // `#answer` is the main target, `var(answer)` is an alias.
+    assert_eq!(run(&db, "var(answer)").unwrap(), Value::Scalar("42".into()));
+}
+```
+
+Dependencies that are files without a rule are fine, as long as they exist.
+
+```rust
+//| id: task-tests
+#[test]
+fn missing_dependency() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("input.txt"), "data").unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(rule(&["copy.txt"], &["input.txt"], "cp input.txt copy.txt")).unwrap();
+    db.add(rule(&["other.txt"], &["nothere.txt"], "touch other.txt")).unwrap();
+    let db = Arc::new(db);
+
+    run(&db, "copy.txt").unwrap();
+    assert_eq!(read(&dir, "copy.txt"), "data");
+    assert_eq!(failures(run(&db, "other.txt")), [Failure::Missing(target("nothere.txt"))]);
+    assert_eq!(failures(run(&db, "#nothing")), [Failure::Missing(target("#nothing"))]);
+}
+```
+
+A failing command fails the rule, and so does a rule that doesn't create its targets.
+
+```rust
+//| id: task-tests
+#[test]
+fn failing_rules() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(rule(&["x.txt"], &[], "false")).unwrap();
+    db.add(rule(&["y.txt"], &[], "true")).unwrap();
+    db.add(rule(&["z.txt"], &[], "no-such-command")).unwrap();
+    let db = Arc::new(db);
+
+    assert_eq!(failures(run(&db, "x.txt")), [Failure::Command { command: "false".into(), code: Some(1) }]);
+    assert_eq!(failures(run(&db, "y.txt")), [Failure::NotAchieved(targets(&["y.txt"]))]);
+    assert!(matches!(&failures(run(&db, "z.txt"))[..], [Failure::Io(msg)] if msg.contains("no-such-command")));
+}
+```
+
+When one rule fails, a slow command that runs in parallel is killed.
+
+```rust
+//| id: task-tests
+#[test]
+fn cancel() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(rule(&["slow.txt"], &[], "sleep 10")).unwrap();
+    db.add(rule(&["fail.txt"], &[], "false")).unwrap();
+    db.add(Rule { name: Some("all".into()), requires: targets(&["slow.txt", "fail.txt"]), ..Default::default() }).unwrap();
+    let db = Arc::new(db);
+
+    let start = Instant::now();
+    let id = db.targets.lookup(&target("#all")).unwrap();
+    assert!(build(&db, &mut Kernel::new(), &WorkerPool::new(2), id).is_err());
+    assert!(start.elapsed() < Duration::from_secs(5));
+}
+```
+
+Mistakes in rules are found when they are added.
+
+```rust
+//| id: task-tests
+#[test]
+fn invalid_rules() {
+    let mut db = TaskDb::new(".");
+    db.add(rule(&["a.txt"], &[], "true")).unwrap();
+    assert_eq!(db.add(rule(&["a.txt"], &[], "true")), Err(RuleError::Duplicate(target("a.txt"))));
+
+    db.add(Rule { stdout: Some(target("listvar(x)")), ..rule(&[], &[], "true") }).unwrap();
+    assert!(matches!(db.add(Rule { stdin: Some(target("var(x)")), ..rule(&["b.txt"], &[], "cat") }),
+        Err(RuleError::TypeMismatch(_))));
+
+    let invalid = [
+        Rule { stdin: Some(target("#a")), ..rule(&["c.txt"], &[], "cat") },
+        Rule { stdout: Some(target("#a")), ..rule(&[], &[], "true") },
+        Rule { path: Some("script.py".into()), ..Rule::default() },
+        Rule { runner: Some("bash".into()), ..Rule::default() },
+        Rule { stdin: Some(target("in.txt")), ..rule(&["d.txt"], &[], "cat\ncat") },
+    ];
+    for r in invalid {
+        assert!(matches!(db.add(r), Err(RuleError::Invalid(_))));
+    }
 }
 ```

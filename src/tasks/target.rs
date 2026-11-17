@@ -30,6 +30,13 @@ fn normalize(path: &Path) -> PathBuf {
     if normal.as_os_str().is_empty() { PathBuf::from(".") } else { normal }
 }
 
+impl Target {
+    /// A path target, normalized.
+    pub fn path(path: impl AsRef<Path>) -> Self {
+        Target::Path(normalize(path.as_ref()))
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct EmptyTarget;
 
@@ -47,7 +54,7 @@ impl FromStr for Target {
         } else if let Some(name) = wrapped(s, "listvar") {
             Target::Variable(name.to_string(), VarType::List)
         } else {
-            Target::Path(normalize(Path::new(s)))
+            Target::path(s)
         })
     }
 }
