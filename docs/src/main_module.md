@@ -6,6 +6,8 @@ The crate consists of a library and a binary. The library exports the modules th
 ```rust
 //| file: src/lib.rs
 pub mod template_strings;
+pub mod noodles;
+pub mod data;
 ```
 
 The binary is the `brei` command-line program.
