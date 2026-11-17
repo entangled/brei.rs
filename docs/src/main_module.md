@@ -7,6 +7,7 @@ The crate consists of a library and a binary. The library exports the modules th
 //| file: src/lib.rs
 pub mod template_strings;
 pub mod noodles;
+pub mod tasks;
 pub mod data;
 ```
 
