@@ -1,3 +1,4 @@
+// ~/~ begin <<docs/src/program_loader.md#src/data.rs>>[init]
 use std::option::Option;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
@@ -162,3 +163,4 @@ mod tests {
         assert_eq!(prg.task[0].description, Some(String::from("Creating temporary directory")));
     }
 }
+// ~/~ end

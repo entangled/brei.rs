@@ -1,0 +1,7 @@
+[book]
+title = "Brei.rs"
+authors = ["Johan Hidding"]
+language = "en"
+
+[preprocessor.strip-frontmatter]
+command = "python3 ../scripts/mdbook_strip_frontmatter.py"

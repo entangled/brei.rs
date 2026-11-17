@@ -1,3 +1,4 @@
+// ~/~ begin <<docs/src/template_strings.md#template-strings::src/template_strings/curly.rs>>[init]
 use std::iter::Iterator;
 use super::result::{Result, Error};
 use super::item::Item;
@@ -120,3 +121,4 @@ mod tests {
             Err(Error::MissingVariable(_))));
     }
 }
+// ~/~ end

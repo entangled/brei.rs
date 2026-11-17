@@ -1,3 +1,4 @@
+// ~/~ begin <<docs/src/template_strings.md#template-strings::src/template_strings/format.rs>>[init]
 use std::collections::HashMap;
 use super::result::Result;
 
@@ -10,3 +11,4 @@ pub trait Format<'a> {
 
     fn format(self, env: &'a Env) -> Result<Self::Output>;
 }
+// ~/~ end

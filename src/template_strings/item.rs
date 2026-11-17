@@ -1,3 +1,4 @@
+// ~/~ begin <<docs/src/template_strings.md#template-strings::src/template_strings/item.rs>>[init]
 use super::result::{Result, Error};
 use super::format::{Format, Env};
 
@@ -13,6 +14,7 @@ pub enum Item<'a> {
     Variable(&'a str)
 }
 
+// ~/~ begin <<docs/src/template_strings.md#template-strings::format-item>>[init]
 impl<'a> Format<'a> for &Item<'a> {
     type Output = &'a str;
     fn format(self, env: &'a Env) -> Result<Self::Output> {
@@ -37,3 +39,5 @@ impl<'a, T: Iterator<Item=Result<Item<'a>>>> Format<'a> for T {
         return Ok(result);
     }
 }
+// ~/~ end
+// ~/~ end

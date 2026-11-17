@@ -1,3 +1,4 @@
+// ~/~ begin <<docs/src/template_strings.md#template-strings::src/template_strings/dollar.rs>>[init]
 use std::iter::Iterator;
 use super::result::{Result, Error};
 use super::item::Item;
@@ -9,17 +10,6 @@ pub struct Dollar<'a> {
 }
 
 /// Create an `Item` iterator for a given dollar-templated string.
-///
-/// # Example
-///
-/// ```rust
-/// let mut env = Env::new();
-/// env.insert(String::from("name"), String::from("Sara"));
-///
-/// assert_eq!(
-///     dollar("Hallo, ${name}!").format(&env).unwrap(),
-///     "Hallo, Sara!");
-/// ```
 pub fn dollar<'a, S>(s: S) -> Dollar<'a> where S: Into<&'a str> {
     Dollar {template: s.into()}
 }
@@ -120,6 +110,7 @@ mod tests {
         assert_eq!(re5.unwrap(), vec![Literal("$"), Literal(" Literal "), Literal("$")]);
     }
 
+    // ~/~ begin <<docs/src/template_strings.md#template-strings::end-to-end-test>>[init]
     #[test]
     fn test_format() {
         let mut env = Env::new();
@@ -141,4 +132,6 @@ mod tests {
             dollar("${number}").format(&env),
             Err(Error::MissingVariable(n)) if n == "number"));
     }
+    // ~/~ end
 }
+// ~/~ end
