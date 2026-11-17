@@ -4,13 +4,13 @@ use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Runner {
+pub struct Runner {
     command: String,
     args: Vec<String>
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ProtoTask {
+pub struct ProtoTask {
     #[serde(default)]
     creates: Vec<String>,
 
@@ -43,7 +43,7 @@ struct ProtoTask {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-enum Join {
+pub enum Join {
     #[serde(alias="inner", alias="INNER")]
     Inner,
 
@@ -59,13 +59,13 @@ impl Default for Join {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
-enum Arguments {
+pub enum Arguments {
     Single(String),
     Multiple(Vec<String>)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Call {
+pub struct Call {
     template: String,
 
     args: HashMap<String, Arguments>,
@@ -78,7 +78,7 @@ struct Call {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Program {
+pub struct Program {
     #[serde(default)]
     task: Vec<ProtoTask>,
 
