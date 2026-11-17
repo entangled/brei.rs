@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::task::{Task, Promise, Response, Error, InternalError};
 use super::kernel::Kernel;
 use super::single_worker::SingleWorker;
+use super::worker_pool::WorkerPool;
 
 type Func = Arc<dyn Fn(&[i64]) -> Response<Mock> + Send + Sync>;
 
@@ -243,6 +244,64 @@ mod tests {
             Mock::new(2, &[1], |x| Response::Value(x[0])),
         ]))).memoized();
         assert!(matches!(eval(promise(1, vec![looping])), Err(Error::Internal(InternalError::NoResult))));
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[8]
+    fn eval_pool(p: Box<Promise<Mock>>) -> Result<i64, Error<Mock>> {
+        let worker = WorkerPool::new(4);
+        let mut kernel = Kernel::new();
+        let result = kernel.run(&worker, p);
+        assert_eq!(kernel.frame_count(), 0);
+        result
+    }
+
+    #[test]
+    fn pool_computations() {
+        let p = promise(3, vec![constant(1, 2), constant(2, 3), binop(3, 1, 2, |a, b| a * b)]);
+        assert_eq!(eval_pool(p).unwrap(), 6);
+        assert_eq!(eval_pool(promise(0, vec![factorial(0, 20)])).unwrap(), 2432902008176640000);
+        assert_eq!(eval_pool(promise(0, vec![factorial_acc(0, 20, 1)])).unwrap(), 2432902008176640000);
+        assert_eq!(eval_pool(promise(0, vec![fibonacci(0, 20)])).unwrap(), 6765);
+        assert_eq!(eval_pool(promise(0, vec![sum_to(0, 10_000)])).unwrap(), 50_005_000);
+    }
+
+    #[test]
+    fn pool_memoization() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        assert_eq!(eval_pool(promise(50, vec![fibonacci_memo(50, runs.clone())])).unwrap(), 12_586_269_025);
+        assert_eq!(runs.load(Ordering::Relaxed), 51);
+    }
+
+    #[test]
+    fn pool_error() {
+        let p = promise(2, vec![
+            Mock::new(1, &[], |_| Response::Error("failed".into())),
+            Mock::new(2, &[1], |x| Response::Value(x[0])),
+        ]);
+        assert!(matches!(eval_pool(p), Err(Error::Job(e)) if e == "failed"));
+        assert!(matches!(eval_pool(promise(2, vec![binop(2, 1, 3, |a, b| a + b)])), Err(Error::Internal(InternalError::NoResult))));
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[9]
+    #[test]
+    fn pool_parallel() {
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let mut tasks: Vec<Mock> = (1..=4).map(|k| {
+            let barrier = barrier.clone();
+            Mock::new(k, &[], move |_| {
+                barrier.wait();
+                Response::Value(k as i64)
+            })
+        }).collect();
+        tasks.push(Mock::new(5, &[1, 2, 3, 4], |x| Response::Value(x.iter().sum())));
+        assert_eq!(eval_pool(promise(5, tasks)).unwrap(), 10);
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[10]
+    #[test]
+    #[should_panic(expected = "boom")]
+    fn pool_panic() {
+        let _ = eval_pool(promise(1, vec![Mock::new(1, &[], |_| panic!("boom"))]));
     }
     // ~/~ end
 }

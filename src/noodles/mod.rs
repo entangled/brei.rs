@@ -2,6 +2,7 @@
 pub mod task;
 pub mod kernel;
 pub mod single_worker;
+pub mod worker_pool;
 
 #[cfg(test)]
 mod mock;

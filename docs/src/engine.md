@@ -10,6 +10,7 @@ Every time a task is complete, its key is looked up in an inverse dependency map
 pub mod task;
 pub mod kernel;
 pub mod single_worker;
+pub mod worker_pool;
 
 #[cfg(test)]
 mod mock;
@@ -334,6 +335,108 @@ impl<T: Task> Worker<T> for SingleWorker<T> {
 }
 ```
 
+Worker Pool
+-----------
+
+The worker pool runs tasks on a fixed number of threads. Submitted tasks go into a shared channel, from which each thread takes the next task to run; responses come back through a second channel. Tasks, keys, values and errors now need to be `Send`, since they cross between threads.
+
+The kernel needs to know when nothing is left to do, otherwise a graph that can't complete would block forever. The pool counts the number of tasks in flight: `submit` increments it, and receiving a response decrements it. When the count is zero the iterator returned by `listen` ends, just like the single worker.
+
+If a task panics, the thread catches the panic and sends it back with the response. The panic is then resumed on the thread that called `listen`, so a panicking task has the same effect as with the single worker.
+
+When the pool is dropped, the threads are told to stop: tasks that are still waiting in the channel are not run, but tasks that are running are allowed to finish.
+
+```rust
+//| file: src/noodles/worker_pool.rs
+use std::cell::Cell;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
+use super::task::{Task, Response, Worker, InternalError};
+use crossbeam_channel::{Sender, Receiver, unbounded};
+
+type Outcome<T> = (u64, <T as Task>::Key, thread::Result<Response<T>>);
+
+pub struct WorkerPool<T: Task> {
+    tasks: Option<Sender<(u64, T)>>,
+    results: Receiver<Outcome<T>>,
+    in_flight: Cell<usize>,
+    shutdown: Arc<AtomicBool>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl<T> WorkerPool<T>
+where T: Task + Send + 'static, T::Key: Send, T::Value: Send, T::Error: Send
+{
+    pub fn new(n_threads: usize) -> Self {
+        let (task_sender, task_receiver) = unbounded::<(u64, T)>();
+        let (result_sender, result_receiver) = unbounded::<Outcome<T>>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let threads = (0..n_threads.max(1)).map(|_| {
+            let tasks = task_receiver.clone();
+            let results = result_sender.clone();
+            let shutdown = shutdown.clone();
+            thread::spawn(move || {
+                for (frame_id, task) in tasks.iter() {
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let key = task.key();
+                    let response = panic::catch_unwind(AssertUnwindSafe(move || task.run()));
+                    if results.send((frame_id, key, response)).is_err() {
+                        break;
+                    }
+                }
+            })
+        }).collect();
+
+        WorkerPool { tasks: Some(task_sender), results: result_receiver, in_flight: Cell::new(0), shutdown, threads }
+    }
+
+    /// A pool with as many threads as the machine can run in parallel.
+    pub fn with_available_parallelism() -> Self {
+        Self::new(thread::available_parallelism().map_or(1, |n| n.get()))
+    }
+}
+
+impl<T> Worker<T> for WorkerPool<T>
+where T: Task + Send + 'static, T::Key: Send, T::Value: Send, T::Error: Send
+{
+    fn submit(&self, frame_id: u64, task: T) -> Result<(), InternalError> {
+        let sender = self.tasks.as_ref().ok_or(InternalError::SendError("worker pool is shut down".into()))?;
+        sender.send((frame_id, task)).map_err(|e| InternalError::SendError(e.to_string()))?;
+        self.in_flight.set(self.in_flight.get() + 1);
+        Ok(())
+    }
+
+    fn listen(&self) -> impl Iterator<Item=(u64, T::Key, Response<T>)> {
+        std::iter::from_fn(move || {
+            if self.in_flight.get() == 0 {
+                return None;
+            }
+            let (frame_id, key, response) = self.results.recv().ok()?;
+            self.in_flight.set(self.in_flight.get() - 1);
+            match response {
+                Ok(response) => Some((frame_id, key, response)),
+                Err(payload) => panic::resume_unwind(payload),
+            }
+        })
+    }
+}
+
+impl<T: Task> Drop for WorkerPool<T> {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.tasks.take();
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+```
+
 Mock tasks
 ----------
 
@@ -347,6 +450,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::task::{Task, Promise, Response, Error, InternalError};
 use super::kernel::Kernel;
 use super::single_worker::SingleWorker;
+use super::worker_pool::WorkerPool;
 
 type Func = Arc<dyn Fn(&[i64]) -> Response<Mock> + Send + Sync>;
 
@@ -647,5 +751,77 @@ fn cycle() {
         Mock::new(2, &[1], |x| Response::Value(x[0])),
     ]))).memoized();
     assert!(matches!(eval(promise(1, vec![looping])), Err(Error::Internal(InternalError::NoResult))));
+}
+```
+
+### Worker pool
+
+The same computations give the same answers on a worker pool. Memoization still runs every Fibonacci task only once, even though tasks now run concurrently: the memo is managed by the kernel, which runs on a single thread.
+
+```rust
+//| id: mock-tests
+fn eval_pool(p: Box<Promise<Mock>>) -> Result<i64, Error<Mock>> {
+    let worker = WorkerPool::new(4);
+    let mut kernel = Kernel::new();
+    let result = kernel.run(&worker, p);
+    assert_eq!(kernel.frame_count(), 0);
+    result
+}
+
+#[test]
+fn pool_computations() {
+    let p = promise(3, vec![constant(1, 2), constant(2, 3), binop(3, 1, 2, |a, b| a * b)]);
+    assert_eq!(eval_pool(p).unwrap(), 6);
+    assert_eq!(eval_pool(promise(0, vec![factorial(0, 20)])).unwrap(), 2432902008176640000);
+    assert_eq!(eval_pool(promise(0, vec![factorial_acc(0, 20, 1)])).unwrap(), 2432902008176640000);
+    assert_eq!(eval_pool(promise(0, vec![fibonacci(0, 20)])).unwrap(), 6765);
+    assert_eq!(eval_pool(promise(0, vec![sum_to(0, 10_000)])).unwrap(), 50_005_000);
+}
+
+#[test]
+fn pool_memoization() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    assert_eq!(eval_pool(promise(50, vec![fibonacci_memo(50, runs.clone())])).unwrap(), 12_586_269_025);
+    assert_eq!(runs.load(Ordering::Relaxed), 51);
+}
+
+#[test]
+fn pool_error() {
+    let p = promise(2, vec![
+        Mock::new(1, &[], |_| Response::Error("failed".into())),
+        Mock::new(2, &[1], |x| Response::Value(x[0])),
+    ]);
+    assert!(matches!(eval_pool(p), Err(Error::Job(e)) if e == "failed"));
+    assert!(matches!(eval_pool(promise(2, vec![binop(2, 1, 3, |a, b| a + b)])), Err(Error::Internal(InternalError::NoResult))));
+}
+```
+
+To show that tasks really run in parallel, four tasks wait on a barrier for four threads. This can only finish if all four run at the same time; on the single worker it would block forever.
+
+```rust
+//| id: mock-tests
+#[test]
+fn pool_parallel() {
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let mut tasks: Vec<Mock> = (1..=4).map(|k| {
+        let barrier = barrier.clone();
+        Mock::new(k, &[], move |_| {
+            barrier.wait();
+            Response::Value(k as i64)
+        })
+    }).collect();
+    tasks.push(Mock::new(5, &[1, 2, 3, 4], |x| Response::Value(x.iter().sum())));
+    assert_eq!(eval_pool(promise(5, tasks)).unwrap(), 10);
+}
+```
+
+A panic in a task is passed on to the caller.
+
+```rust
+//| id: mock-tests
+#[test]
+#[should_panic(expected = "boom")]
+fn pool_panic() {
+    let _ = eval_pool(promise(1, vec![Mock::new(1, &[], |_| panic!("boom"))]));
 }
 ```
