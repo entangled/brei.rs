@@ -15,6 +15,7 @@ These differences from the Python version are deliberate:
 - **Dollar escapes:** `$$` stays a literal dollar sign through calls of templates. In Python, every substitution turns `$$` into `$`, so `$$` in a template that is called ends up as a variable.
 - **Error messages** are worded differently. For example, splicing a scalar variable says that it `is not a list variable`, where Python says that `splice` `needs a list variable`.
 - **Empty variables:** a scalar variable with empty output is `""`, where Python gives `None`.
+- **Variable rules:** a rule that writes to a variable always runs, also when the files it creates are up to date. Python skips it, and the variable has no value.
 - **History:** the history file is always used. The Python library can also run without one.
 
 Setup

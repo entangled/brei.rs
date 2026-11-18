@@ -100,6 +100,18 @@ fn variables() {
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[2]
 #[test]
+fn variable_and_file() {
+    let dir = TempDir::new().unwrap();
+    let db = TaskDb::new(dir.path());
+    db.add(Rule { stdout: Some(target("var(x)")), ..bash(&["x.txt"], &[], "touch x.txt; echo x") }).unwrap();
+    let db = Arc::new(db);
+
+    assert_eq!(run(&db, "var(x)").unwrap(), Value::Scalar("x".into()));
+    assert_eq!(run(&db, "var(x)").unwrap(), Value::Scalar("x".into()));
+}
+// ~/~ end
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[3]
+#[test]
 fn several_targets() {
     let dir = TempDir::new().unwrap();
     let db = TaskDb::new(dir.path());
@@ -116,7 +128,7 @@ fn several_targets() {
     assert_eq!(run(&db, "var(answer)").unwrap(), Value::Scalar("42".into()));
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[3]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[4]
 #[test]
 fn missing_dependency() {
     let dir = TempDir::new().unwrap();
@@ -132,7 +144,7 @@ fn missing_dependency() {
     assert_eq!(failures(run(&db, "#nothing")), [Failure::Missing(target("#nothing"))]);
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[4]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[5]
 #[test]
 fn failing_rules() {
     let dir = TempDir::new().unwrap();
@@ -149,7 +161,7 @@ fn failing_rules() {
     assert_eq!(z[0].to_string(), "creating `z.txt`: can't run `no-such-command`: No such file or directory (os error 2)");
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[5]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[6]
 #[test]
 fn cancel() {
     let dir = TempDir::new().unwrap();
@@ -165,7 +177,7 @@ fn cancel() {
     assert!(start.elapsed() < Duration::from_secs(5));
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[6]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[7]
 #[cfg(target_os = "linux")]
 #[test]
 fn kill_group() {
@@ -188,7 +200,7 @@ fn kill_group() {
     assert!(!alive(), "`sleep` is still running");
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[7]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[8]
 #[test]
 fn invalid_rules() {
     let db = TaskDb::new(".");
@@ -211,7 +223,7 @@ fn invalid_rules() {
     }
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[8]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[9]
 #[test]
 fn persistent_history() {
     let dir = TempDir::new().unwrap();
@@ -247,7 +259,7 @@ fn persistent_history() {
     assert!(TaskDb::new(dir.path()).load_history(HISTORY_FILE).is_err());
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[9]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[10]
 #[test]
 fn build_several() {
     let dir = TempDir::new().unwrap();
@@ -271,7 +283,7 @@ fn build_several() {
     assert!(dir.path().join("b.txt").exists() && dir.path().join("c.txt").exists());
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[10]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[11]
 fn template(creates: &[&str], requires: &[&str], script: &str) -> RuleTemplate {
     let strings = |ts: &[&str]| ts.iter().map(|t| t.to_string()).collect();
     RuleTemplate { creates: strings(creates), requires: strings(requires), script: Some(script.into()), ..Default::default() }
@@ -294,7 +306,7 @@ fn environment() {
     assert_eq!(read(&dir, "output.txt"), "hello");
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[11]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[12]
 #[test]
 fn template_variables() {
     let dir = TempDir::new().unwrap();
@@ -311,7 +323,7 @@ fn template_variables() {
     assert_eq!(run(&db, "var(dollars)").unwrap(), Value::Scalar("$1 $1 $(x)".into()));
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[12]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[13]
 #[test]
 fn splice() {
     let dir = TempDir::new().unwrap();
@@ -332,7 +344,7 @@ fn splice() {
     assert_eq!(failures(run(&db, "d.txt")), [Failure::Missing(target("nothere.txt"))]);
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[13]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[14]
 #[test]
 fn invalid_templates() {
     let dir = TempDir::new().unwrap();

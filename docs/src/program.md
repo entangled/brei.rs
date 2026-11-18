@@ -258,7 +258,7 @@ impl<'a, W: Worker<Job>> Resolver<'a, W> {
 }
 ```
 
-To get the values of variables, we build them all at once, and then ask for them one by one. The second time, the values come straight from the memo of the kernel. Variables have to have a value: a rule that creates a variable but didn't need to run gives `Nothing`.
+To get the values of variables, we build them all at once, and then ask for them one by one. The second time, the values come straight from the memo of the kernel. Rules that write to a variable always run, so every variable that comes out of a rule has a value.
 
 ```rust
 //| id: resolver-values

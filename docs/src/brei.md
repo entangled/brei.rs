@@ -387,7 +387,7 @@ A *rule* says how to create a set of targets from a set of dependencies. This is
 - optionally `stdin` and `stdout`, which redirect standard input and output to a file or variable. Standard input can only come from a file or a scalar variable; standard output can go to a file, a scalar variable or a list variable;
 - a `description`, used for logging, and `force`, to always run the rule.
 
-The targets in `stdout` and `name`, and the dependencies in `stdin` and `path`, are added to `creates` and `requires` when the rule is added to the database. A rule that doesn't create any file is always run, so that is the case for rules that only have phony or variable targets.
+The targets in `stdout` and `name`, and the dependencies in `stdin` and `path`, are added to `creates` and `requires` when the rule is added to the database. A rule that doesn't create any file is always run, so that is the case for rules that only have phony or variable targets. A rule that writes its standard output to a variable is always run as well, even when it also creates files: the value of a variable only lives in memory, so the rule has to run to give it.
 
 ```rust
 //| file: src/tasks/rule.rs
@@ -559,7 +559,7 @@ impl Rule {
     }
 
     pub fn always_run(&self) -> bool {
-        self.force || self.target_paths().next().is_none()
+        self.force || self.target_paths().next().is_none() || matches!(self.stdout, Some(Target::Variable(..)))
     }
 
     /// Add implied targets and dependencies, and check that the rule makes sense.
@@ -1615,6 +1615,22 @@ fn variables() {
     run(&db, "shout.txt").unwrap();
     assert_eq!(read(&dir, "shout.txt"), "HELLO WORLD");
     assert_eq!(run(&db, "listvar(files)").unwrap(), Value::List(vec!["a".into(), "b".into(), "c".into()]));
+}
+```
+
+A rule that writes to a variable and also creates a file runs every time, so that the variable has a value, even when the file is up to date.
+
+```rust
+//| id: task-tests
+#[test]
+fn variable_and_file() {
+    let dir = TempDir::new().unwrap();
+    let db = TaskDb::new(dir.path());
+    db.add(Rule { stdout: Some(target("var(x)")), ..bash(&["x.txt"], &[], "touch x.txt; echo x") }).unwrap();
+    let db = Arc::new(db);
+
+    assert_eq!(run(&db, "var(x)").unwrap(), Value::Scalar("x".into()));
+    assert_eq!(run(&db, "var(x)").unwrap(), Value::Scalar("x".into()));
 }
 ```
 

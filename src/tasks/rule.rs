@@ -138,7 +138,7 @@ impl Rule {
     }
 
     pub fn always_run(&self) -> bool {
-        self.force || self.target_paths().next().is_none()
+        self.force || self.target_paths().next().is_none() || matches!(self.stdout, Some(Target::Variable(..)))
     }
 
     /// Add implied targets and dependencies, and check that the rule makes sense.

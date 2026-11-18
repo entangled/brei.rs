@@ -48,6 +48,7 @@ Done so far
 - **Housekeeping:** the unused `futures` dependency is gone, the crate is on edition 2024 (with a `let` chain in the dollar parser; the kernel has no real candidates), and `cargo clippy --all-targets` is clean.
 - **Process groups** (`brei.md`, `src/tasks/group.rs`): on Unix, each command runs in its own process group, and cancelling kills the whole group. Because commands then no longer get the terminal's Ctrl-C, the library keeps a registry of running groups, and the binary installs a handler (`ctrlc`) that calls `tasks::kill_all`.
 - **Local cycles** (`engine.md`): the kernel checks every promise it adds for tasks that wait for each other (`Promise::cycle`, a depth-first search), and reports them as `Error::Cycle`.
+- **Variable rules always run** (`brei.md`): a rule whose `stdout` is a variable is always run, also when it creates files that are up to date, so the variable gets a value. Python gives `None` in that case.
 
 Remaining work
 --------------
@@ -61,8 +62,7 @@ Known limitations
 - **Interrupts:** on Ctrl-C or `SIGTERM`, `brei` kills the running commands and exits with code 130, without saving the history.
 - **Standard input:** a command without `stdin` reads from `/dev/null`, not from the terminal. This differs from Python, on purpose.
 - **Empty variables:** a scalar variable with empty output is `""`, where Python gives `None`.
-- **Variables without a value:** a template that uses a variable whose value is `Value::Nothing` (see below) fails with "variable has no value".
-- **Skipped variable rules:** a rule that writes to a variable *and* creates files gives the value `Value::Nothing` when it is up to date and doesn't run. Python has the same problem.
+- **Variables without a value:** a template that uses a variable whose value is `Value::Nothing` (a variable in `creates` that isn't the rule's `stdout`) fails with "variable has no value".
 
 Conventions
 -----------
