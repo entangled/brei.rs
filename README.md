@@ -39,7 +39,7 @@ A task runs when one of its targets is missing, older than one of its dependenci
 
 ## Development
 
-Brei.rs is a literate program: the source is the book in `docs/src/`, and the Rust files in `src/` are generated from it with [Entangled](https://entangled.github.io). Edit the Markdown, not the Rust files, and keep the files in sync with:
+Brei.rs is a literate program: the source is the book in `docs/src/`, and the Rust files in `src/` are generated from it with [Entangled](https://entangled.github.io). While Entangled is watching, you can edit either the Markdown or the Rust files, and the changes go both ways:
 
 ```
 uv run entangled watch

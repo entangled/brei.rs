@@ -67,5 +67,5 @@ Known limitations
 Conventions
 -----------
 
-- The project is literate: edit the Markdown in `docs/src/`, never the files in `src/` directly. `entangled watch` tangles the code; run `uv run entangled tangle` if the watcher isn't running. Each chapter's code blocks use `//| file:` and `//| id:`, and chapters with a namespace in their front matter (`brei`, `template-strings`) keep their ids apart.
+- The project is literate: the files in `src/` are tangled from the Markdown in `docs/src/`. While `entangled watch` runs, you can edit either, and the changes go both ways. Without the watcher, run `uv run entangled tangle` after editing the Markdown, or `uv run entangled stitch` after editing the Rust files. Each chapter's code blocks use `//| file:` and `//| id:`, and chapters with a namespace in their front matter (`brei`, `template-strings`) keep their ids apart.
 - Tests live in the chapters, next to the code they test.
