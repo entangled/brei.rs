@@ -417,3 +417,6 @@ brei coverage
 
 # License
 Copyright 2023 Netherlands eScience Center, Licensed under the Apache License, Version 2.0, see [LICENSE](https://github.com/entangled/brei.rs/blob/main/LICENSE).
+
+# Use of generative AI
+Significant parts of this port from Python to Rust were done by Claude Opus 5.5, a large language model by Anthropic, working in [Claude Code](https://claude.com/claude-code). It worked under the direction of the author, who set the design and the conventions. The first version of the task engine (`noodles`), the template strings, and the literate setup of the project were written by hand. Claude wrote most of the rest: the engine's memoization, cancellation and cycle detection; the Brei rules, variables, templates and program resolution; the program loader and the command-line interface; the tests ported from Python Brei; and this book's tooling for coverage and running examples. Most of the prose in this book was written by Claude as well. Commits with Claude's work are marked `Co-Authored-By: Claude` in the Git history.
