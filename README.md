@@ -34,7 +34,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/entangled/brei.rs/relea
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/entangled/brei.rs/releases/latest/download/brei-installer.ps1 | iex"
 ```
 
-These put `brei` in `~/.cargo/bin`. To put it somewhere else, download the archive for your platform from the [releases page](https://github.com/entangled/brei.rs/releases), and copy `brei` (or `brei.exe`) to any directory on your `PATH`.
+These put `brei` in `~/.local/bin` (or `$XDG_BIN_HOME`, if you set it), and add that to your `PATH` if needed. To put it somewhere else, download the archive for your platform from the [releases page](https://github.com/entangled/brei.rs/releases), and copy `brei` (or `brei.exe`) to any directory on your `PATH`.
 
 With Rust, you can also build it from source:
 
