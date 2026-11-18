@@ -8,7 +8,7 @@ A workflow is a TOML, YAML (`.yaml` or `.yml`) or JSON file; the extension decid
 
 1. the file given with `-i`, for example `-i workflow.toml`;
 2. `brei.toml` in the current directory;
-3. `brei.yaml` in the current directory;
+3. `brei.yaml` or `brei.yml` in the current directory;
 4. the `[tool.brei]` section of `pyproject.toml`.
 
 A workflow can also be a section of a bigger file. On the command line, the section goes in brackets after the file name, with dots between the keys: `-i pyproject.toml[tool.brei]`. Included files are always read as a whole.

@@ -23,7 +23,7 @@ impl fmt::Display for LoadError {
             LoadError::Invalid(path, msg) => write!(f, "in `{}`: {msg}", path.display()),
             LoadError::MissingSection(path, section) => write!(f, "`{}` should contain a section `{section}`", path.display()),
             LoadError::NoInput => write!(f,
-                "no input file given, and no `brei.toml`, `brei.yaml`, or `pyproject.toml` with a `[tool.brei]` section, was found"),
+                "no input file given, and no `brei.toml`, `brei.yaml`, `brei.yml`, or `pyproject.toml` with a `[tool.brei]` section, was found"),
         }
     }
 }
@@ -73,7 +73,7 @@ pub fn read_program(dir: &Path, input: Option<&str>) -> Result<Program, LoadErro
         let (file, section) = split_input(input);
         return read_from_file(&dir.join(file), section);
     }
-    for name in ["brei.toml", "brei.yaml"] {
+    for name in ["brei.toml", "brei.yaml", "brei.yml"] {
         let brei = dir.join(name);
         if brei.exists() {
             return read_from_file(&brei, None);
@@ -220,6 +220,8 @@ mod tests {
 
         write(&dir, "pyproject.toml", "[tool.brei]\ninclude = [\"pyproject\"]\n");
         assert_eq!(read_program(dir.path(), None).unwrap().include, ["pyproject"]);
+        write(&dir, "brei.yml", "include: [yml]\n");
+        assert_eq!(read_program(dir.path(), None).unwrap().include, ["yml"]);
         write(&dir, "brei.yaml", "include: [yaml]\n");
         assert_eq!(read_program(dir.path(), None).unwrap().include, ["yaml"]);
         write(&dir, "brei.toml", "include = [\"brei\"]\n");
