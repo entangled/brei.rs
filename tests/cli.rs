@@ -31,6 +31,7 @@ runner = "bash"
 script = "echo run >> log.txt; echo hello > hello.txt"
 "#;
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn build() {
     let dir = setup(HELLO);
@@ -56,6 +57,7 @@ creates = ["ok.txt"]
 script = "touch ok.txt"
 "#;
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn failure() {
     let dir = setup(FAILING);
@@ -70,6 +72,7 @@ fn failure() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/main_module.md#cli-tests>>[2]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn logging() {
     let dir = setup(r#"
@@ -94,6 +97,7 @@ fn logging() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/main_module.md#cli-tests>>[3]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn input_file() {
     let dir = TempDir::new().unwrap();

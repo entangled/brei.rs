@@ -47,6 +47,7 @@ fn failures(result: Result<Value, Error<Job>>) -> Vec<Failure> {
 }
 
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[init]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn hello() {
     let dir = TempDir::new().unwrap();
@@ -56,6 +57,7 @@ fn hello() {
     assert_eq!(read(&dir, "hello.txt"), "hello\n");
 }
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn up_to_date() {
     let dir = TempDir::new().unwrap();
@@ -79,6 +81,7 @@ fn up_to_date() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[1]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn variables() {
     let dir = TempDir::new().unwrap();
@@ -99,6 +102,7 @@ fn variables() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[2]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn variable_and_file() {
     let dir = TempDir::new().unwrap();
@@ -111,6 +115,7 @@ fn variable_and_file() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[3]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn several_targets() {
     let dir = TempDir::new().unwrap();
@@ -129,6 +134,7 @@ fn several_targets() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[4]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn missing_dependency() {
     let dir = TempDir::new().unwrap();
@@ -145,6 +151,7 @@ fn missing_dependency() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[5]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn failing_rules() {
     let dir = TempDir::new().unwrap();
@@ -162,6 +169,7 @@ fn failing_rules() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[6]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn cancel() {
     let dir = TempDir::new().unwrap();
@@ -234,6 +242,7 @@ fn runner_arguments() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[10]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn persistent_history() {
     let dir = TempDir::new().unwrap();
@@ -270,6 +279,7 @@ fn persistent_history() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[11]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn build_several() {
     let dir = TempDir::new().unwrap();
@@ -299,6 +309,7 @@ fn template(creates: &[&str], requires: &[&str], script: &str) -> RuleTemplate {
     RuleTemplate { creates: strings(creates), requires: strings(requires), script: Some(script.into()), ..Default::default() }
 }
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn environment() {
     let dir = TempDir::new().unwrap();
@@ -317,6 +328,7 @@ fn environment() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[13]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn template_variables() {
     let dir = TempDir::new().unwrap();
@@ -334,6 +346,7 @@ fn template_variables() {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[14]
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn splice() {
     let dir = TempDir::new().unwrap();

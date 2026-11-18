@@ -155,6 +155,7 @@ mod tests {
     }
     // ~/~ end
     // ~/~ begin <<docs/src/program_loader.md#loader-tests>>[1]
+    #[cfg_attr(windows, ignore = "uses Unix tools")]
     #[test]
     fn sample() {
         let dir = TempDir::new().unwrap();
@@ -173,6 +174,7 @@ mod tests {
     }
     // ~/~ end
     // ~/~ begin <<docs/src/program_loader.md#loader-tests>>[2]
+    #[cfg_attr(windows, ignore = "uses Unix tools")]
     #[test]
     fn yaml() {
         let dir = TempDir::new().unwrap();

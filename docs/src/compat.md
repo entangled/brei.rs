@@ -256,6 +256,7 @@ name = "all"
 requires = ["#inner", "#outer"]
 "##;
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn workflows() {
     let hello: &[(&str, &str)] = &[("hello.txt", "Hello, World")];
@@ -299,6 +300,7 @@ name = "all"
 requires = ["#forced", "#unforced"]
 "##;
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn forcing() {
     let workflow = Workflow::new(FORCE_RUN);
@@ -486,6 +488,7 @@ From `test_history.py`. With the history, a rule that is up to date doesn't run,
 const WF1: &str = r##"{"task": [{"stdout": "x", "script": "echo 'hello'"}, {"name": "all", "requires": ["x"]}]}"##;
 const WF2: &str = r##"{"task": [{"stdout": "x", "script": "echo 'goodbye'"}, {"name": "all", "requires": ["x"]}]}"##;
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn history() {
     let workflow = Workflow::new("");
@@ -649,6 +652,7 @@ name = "clean"
 script = "rm hello.txt"
 "##;
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn example_tasks() {
     let workflow = Workflow::new(TASKS_EXAMPLE);
@@ -658,6 +662,7 @@ fn example_tasks() {
     assert!(!workflow.exists("hello.txt"));
 }
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn example_rot13() {
     let log = Workflow::new(ROT13_EXAMPLE).run(&["all"]);
@@ -702,6 +707,7 @@ name = "all"
 requires = ["#inner", "#outer"]
 "##;
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn example_template_multiplexing() {
     let workflow = Workflow::new(MULTIPLEXING_EXAMPLE);
@@ -773,6 +779,7 @@ name = "all"
 requires = ["#write-outs"]
 "##;
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn example_includes() {
     let workflow = Workflow::new(HELLO_INCLUDES_EXAMPLE);
@@ -872,6 +879,7 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success());
 }
 
+#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn example_versioned_output() {
     let workflow = Workflow::new(VERSIONED_OUTPUT_EXAMPLE);
