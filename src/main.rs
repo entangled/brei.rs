@@ -184,6 +184,14 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     init_logger(args.debug);
+    let interrupted = ctrlc::set_handler(|| {
+        tasks::kill_all();
+        log::error!("interrupted");
+        std::process::exit(130);
+    });
+    if let Err(e) = interrupted {
+        log::warn!("can't handle interrupts: {e}");
+    }
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {

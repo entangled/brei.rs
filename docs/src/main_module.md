@@ -185,7 +185,7 @@ fn describe(db: &TaskDb, error: Error<Job>) -> String {
 
 ### Running
 
-Programs are read relative to the current directory, and so is the history. The history is loaded before resolving the program, since resolving may already run rules. It is saved afterwards, also when something failed: rules that succeeded don't need to run again. Resolving and building use the same kernel, so that what was computed during resolution is not computed again.
+Programs are read relative to the current directory, and so is the history. When Brei is interrupted (Ctrl-C, or `SIGTERM`), it kills the commands that are running, which run in [process groups](./brei.md#process-groups) of their own and wouldn't stop otherwise, and exits with code 130. The history isn't saved then. The history is loaded before resolving the program, since resolving may already run rules. It is saved afterwards, also when something failed: rules that succeeded don't need to run again. Resolving and building use the same kernel, so that what was computed during resolution is not computed again.
 
 ```rust
 //| id: main-run
@@ -232,6 +232,14 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     init_logger(args.debug);
+    let interrupted = ctrlc::set_handler(|| {
+        tasks::kill_all();
+        log::error!("interrupted");
+        std::process::exit(130);
+    });
+    if let Err(e) = interrupted {
+        log::warn!("can't handle interrupts: {e}");
+    }
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {

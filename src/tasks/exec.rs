@@ -9,6 +9,7 @@ use tempfile::{NamedTempFile, TempPath};
 use crate::noodles::task::CancelToken;
 use crate::template_strings::{dollar, Env, Format};
 use super::db::TaskDb;
+use super::group;
 use super::rule::{Rule, Value, Failure};
 use super::target::{Target, VarType};
 
@@ -162,7 +163,7 @@ fn forward(stream: impl Read + Send + 'static, note: &str) -> thread::JoinHandle
 }
 
 fn run_command(mut cmd: Command, display: &str, input: Option<&str>, capture: bool, note: &str, cancel: &CancelToken) -> Result<Vec<u8>, Failure> {
-    let mut child = cmd.spawn().map_err(|e| Failure::Io(format!("can't run `{display}`: {e}")))?;
+    let mut child = group::spawn(&mut cmd).map_err(|e| Failure::Io(format!("can't run `{display}`: {e}")))?;
 
     let writer = match (child.stdin.take(), input) {
         (Some(mut stdin), Some(data)) => {
@@ -183,11 +184,13 @@ fn run_command(mut cmd: Command, display: &str, input: Option<&str>, capture: bo
 
     let status = loop {
         if let Some(status) = child.try_wait()? {
+            group::done(&child);
             break status;
         }
         if cancel.is_cancelled() {
-            let _ = child.kill();
+            group::kill(&mut child);
             let _ = child.wait();
+            group::done(&child);
             return Err(Failure::Cancelled);
         }
         thread::sleep(Duration::from_millis(10));

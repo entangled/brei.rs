@@ -20,6 +20,7 @@ mod template;
 mod history;
 mod program;
 mod exec;
+mod group;
 mod job;
 
 #[cfg(test)]
@@ -30,6 +31,7 @@ pub use rule::{Rule, RuleError, Runner, Value, Failure, default_runners};
 pub use db::TaskDb;
 pub use template::RuleTemplate;
 pub use history::HISTORY_FILE;
+pub use group::kill_all;
 pub use program::{Program, Call, Argument, Join, ProgramError, resolve};
 pub use job::{Job, build, build_all};
 ```
@@ -1016,6 +1018,7 @@ use tempfile::{NamedTempFile, TempPath};
 use crate::noodles::task::CancelToken;
 use crate::template_strings::{dollar, Env, Format};
 use super::db::TaskDb;
+use super::group;
 use super::rule::{Rule, Value, Failure};
 use super::target::{Target, VarType};
 
@@ -1181,7 +1184,7 @@ pub(super) fn execute(&self, rule: &Rule, input: Option<&str>, cancel: &CancelTo
 
 Input and output go through pipes. Each pipe gets its own thread, so that a command that writes a lot of output before reading its input can't block. Output is either captured, or forwarded to the log line by line. Meanwhile, we poll the command to see if it has finished, and check the cancel token. A cancelled command is killed.
 
-Killing only stops the command itself. If the command started processes of its own, like a runner script that calls other programs, those keep running. Fixing that needs process groups, which is platform specific.
+A command can start processes of its own, like a runner script that calls other programs. Killing only the command would leave those running, so commands run in a [process group](#process-groups) of their own, which is killed as a whole.
 
 ```rust
 //| id: exec-run-command
@@ -1199,7 +1202,7 @@ fn forward(stream: impl Read + Send + 'static, note: &str) -> thread::JoinHandle
 }
 
 fn run_command(mut cmd: Command, display: &str, input: Option<&str>, capture: bool, note: &str, cancel: &CancelToken) -> Result<Vec<u8>, Failure> {
-    let mut child = cmd.spawn().map_err(|e| Failure::Io(format!("can't run `{display}`: {e}")))?;
+    let mut child = group::spawn(&mut cmd).map_err(|e| Failure::Io(format!("can't run `{display}`: {e}")))?;
 
     let writer = match (child.stdin.take(), input) {
         (Some(mut stdin), Some(data)) => {
@@ -1220,11 +1223,13 @@ fn run_command(mut cmd: Command, display: &str, input: Option<&str>, capture: bo
 
     let status = loop {
         if let Some(status) = child.try_wait()? {
+            group::done(&child);
             break status;
         }
         if cancel.is_cancelled() {
-            let _ = child.kill();
+            group::kill(&mut child);
             let _ = child.wait();
+            group::done(&child);
             return Err(Failure::Cancelled);
         }
         thread::sleep(Duration::from_millis(10));
@@ -1244,6 +1249,72 @@ fn run_command(mut cmd: Command, display: &str, input: Option<&str>, capture: bo
         return Err(Failure::Command { command: display.to_string(), code: status.code() });
     }
     Ok(output)
+}
+```
+
+### Process groups
+
+On Unix, every command runs in a process group of its own, whose id is the process id of the command. Killing the group kills the command and everything it started (unless those started groups of their own). Before the command is waited for, its process id can't be reused, so it is safe to kill the group then.
+
+There is a catch. When you press Ctrl-C, the terminal sends `SIGINT` to the foreground process group, which is the group of `brei`. Commands in their own group don't get it, so they would keep running after `brei` stops. That's why we keep track of the groups that are running: `kill_all` kills them all, and is meant to be called when Brei is interrupted. After that, no new commands start. Starting a command and adding it to the list happens while holding the lock, so a command can't slip through.
+
+On other platforms, commands are killed with `Child::kill`, and `kill_all` doesn't do anything. On Windows, Ctrl-C reaches every process in the console anyway.
+
+```rust
+//| file: src/tasks/group.rs
+use std::collections::BTreeSet;
+use std::io;
+use std::process::{Child, Command};
+use std::sync::Mutex;
+
+struct Running {
+    stopping: bool,
+    groups: BTreeSet<u32>,
+}
+
+static RUNNING: Mutex<Running> = Mutex::new(Running { stopping: false, groups: BTreeSet::new() });
+
+/// Start a command in a process group of its own.
+pub(super) fn spawn(cmd: &mut Command) -> io::Result<Child> {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(cmd, 0);
+    let mut running = RUNNING.lock().unwrap();
+    if running.stopping {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Brei is stopping"));
+    }
+    let child = cmd.spawn()?;
+    running.groups.insert(child.id());
+    Ok(child)
+}
+
+/// Forget about a command, after waiting for it.
+pub(super) fn done(child: &Child) {
+    RUNNING.lock().unwrap().groups.remove(&child.id());
+}
+
+/// Kill a command, and everything it started. Do this before waiting for it.
+pub(super) fn kill(child: &mut Child) {
+    #[cfg(unix)]
+    kill_group(child.id());
+    let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn kill_group(id: u32) {
+    // SAFETY: `kill` only sends a signal; it has no memory safety requirements.
+    unsafe {
+        libc::kill(-(id as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+/// Kill all running commands, and don't start new ones. For when Brei is interrupted.
+pub fn kill_all() {
+    let mut running = RUNNING.lock().unwrap();
+    running.stopping = true;
+    #[cfg(unix)]
+    for id in &running.groups {
+        kill_group(*id);
+    }
 }
 ```
 
@@ -1627,6 +1698,33 @@ fn cancel() {
     let id = db.targets.lookup(&target("#all")).unwrap();
     assert!(build(&db, &mut Kernel::new(), &WorkerPool::new(2), id).is_err());
     assert!(start.elapsed() < Duration::from_secs(5));
+}
+```
+
+A cancelled command is killed with everything it started. Here the runner, `bash`, starts `sleep`, which should be killed as well. To see if `sleep` is still running, we look in `/proc`, so this test only runs on Linux. A killed process may still be around for a moment, as a zombie, until it is cleaned up.
+
+```rust
+//| id: task-tests
+#[cfg(target_os = "linux")]
+#[test]
+fn kill_group() {
+    let dir = TempDir::new().unwrap();
+    let db = TaskDb::new(dir.path());
+    db.add(bash(&["slow.txt"], &[], "sleep 30 & echo $! > sleep.pid; wait")).unwrap();
+    db.add(bash(&["fail.txt"], &[], "while [ ! -s sleep.pid ]; do sleep 0.01; done; false")).unwrap();
+    db.add(Rule { name: Some("all".into()), requires: targets(&["slow.txt", "fail.txt"]), ..Default::default() }).unwrap();
+    let db = Arc::new(db);
+
+    let id = db.targets.lookup(&target("#all")).unwrap();
+    assert!(build(&db, &mut Kernel::new(), &WorkerPool::new(2), id).is_err());
+    let pid = read(&dir, "sleep.pid");
+    let alive = || fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+        .is_ok_and(|stat| stat.rsplit(") ").next().is_some_and(|rest| !rest.starts_with('Z')));
+    let start = Instant::now();
+    while alive() && start.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!alive(), "`sleep` is still running");
 }
 ```
 

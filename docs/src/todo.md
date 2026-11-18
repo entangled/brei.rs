@@ -46,6 +46,7 @@ Done so far
   - The binary has a small logger on stderr: notes in colour, backticks in bold, `--debug` for debug messages, and no colour off a terminal or with `NO_COLOR`.
 - **Tests against Python Brei** (`compat.md`, `tests/python.rs`): the tests from `test_program.py`, `test_history.py`, `test_construct.py` and the file-level tests of `test_lazy.py`, and the examples from the Python documentation (except `force_run`, which needs `coverage`), run the `brei` binary. They need `python` and `git`; the Lua example is skipped without `lua`. The chapter lists the deliberate differences from Python. The `versioned_output` example makes a broken `output/latest` link; that is a mistake in the example itself, not in Brei.
 - **Housekeeping:** the unused `futures` dependency is gone, the crate is on edition 2024 (with a `let` chain in the dollar parser; the kernel has no real candidates), and `cargo clippy --all-targets` is clean.
+- **Process groups** (`brei.md`, `src/tasks/group.rs`): on Unix, each command runs in its own process group, and cancelling kills the whole group. Because commands then no longer get the terminal's Ctrl-C, the library keeps a registry of running groups, and the binary installs a handler (`ctrlc`) that calls `tasks::kill_all`.
 
 Remaining work
 --------------
@@ -55,7 +56,8 @@ The port is complete. What is left are the known limitations below.
 Known limitations
 -----------------
 
-- **Killing commands:** a cancelled command is killed, but processes it started itself keep running. For example, cancelling a `bash` runner leaves its `sleep` running. Fixing this needs process groups, which is platform specific.
+- **Killing commands:** on Unix, commands run in their own process group, which is killed as a whole. On other platforms, only the command itself is killed, and processes it started keep running.
+- **Interrupts:** on Ctrl-C or `SIGTERM`, `brei` kills the running commands and exits with code 130, without saving the history.
 - **Local cycles:** cycles between local tasks within one promise aren't detected; the run ends with `NoResult`. Cycles through targets are detected.
 - **Standard input:** a command without `stdin` reads from `/dev/null`, not from the terminal. This differs from Python, on purpose.
 - **Empty variables:** a scalar variable with empty output is `""`, where Python gives `None`.
