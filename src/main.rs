@@ -19,7 +19,7 @@ struct Args {
     /// Names of the tasks to run, or other targets: files, or variables as `var(name)`.
     targets: Vec<String>,
 
-    /// Brei TOML or JSON file; use a `[...]` suffix to indicate a section.
+    /// Brei TOML, YAML or JSON file; use a `[...]` suffix to indicate a section.
     #[arg(short, long)]
     input_file: Option<String>,
 

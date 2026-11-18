@@ -4,7 +4,7 @@ This chapter lists everything that can go in a Brei workflow file. The [introduc
 
 ## Files
 
-A workflow is a TOML or JSON file; the extension decides which. `brei` reads, in this order:
+A workflow is a TOML, YAML (`.yaml` or `.yml`) or JSON file; the extension decides which. `brei` reads, in this order:
 
 1. the file given with `-i`, for example `-i workflow.toml`;
 2. `brei.toml` in the current directory;
@@ -27,7 +27,7 @@ All keys are optional.
 | `include`     | list of strings         | Other workflow files to [include](#includes).    |
 | `runner`      | table of [runners](#runners) | Extra runners, by name.                     |
 
-The same workflow in TOML and in JSON:
+The same workflow in TOML, YAML and JSON:
 
 ```toml
 [environment]
@@ -37,6 +37,15 @@ greeting = "Hello"
 name = "all"
 stdout = "hello.txt"
 script = "echo '${greeting}, World!'"
+```
+
+```yaml
+environment:
+  greeting: Hello
+task:
+  - name: all
+    stdout: hello.txt
+    script: "echo '${greeting}, World!'"
 ```
 
 ```json
@@ -188,7 +197,7 @@ The template can also come from an [include](#includes).
 
 ## Includes
 
-`include` lists other workflow files, TOML or JSON, whose contents are added to this one. Include paths are template strings, and an included file can be created by a task in the including workflow: Brei runs that task first.
+`include` lists other workflow files, in TOML, YAML or JSON, whose contents are added to this one. Include paths are template strings, and an included file can be created by a task in the including workflow: Brei runs that task first.
 
 ```toml
 include = ["${dir}/generated.json"]

@@ -1,7 +1,7 @@
 Program Loader
 ==============
 
-A Brei [program](./program.md) is read from a TOML or JSON file, depending on its extension. It can also be a section of a bigger file: a Python project can keep its workflow in `pyproject.toml`, under `[tool.brei]`. Sections are written with dots, `tool.brei`.
+A Brei [program](./program.md) is read from a TOML, YAML (`.yaml` or `.yml`) or JSON file, depending on its extension. It can also be a section of a bigger file: a Python project can keep its workflow in `pyproject.toml`, under `[tool.brei]`. Sections are written with dots, `tool.brei`.
 
 On the command line, a section is given in brackets after the file name: `pyproject.toml[tool.brei]`. Without an input file, Brei looks for `brei.toml`, and then for a `[tool.brei]` section in `pyproject.toml`.
 
@@ -41,7 +41,7 @@ impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LoadError::Io(path, msg) => write!(f, "can't read `{}`: {msg}", path.display()),
-            LoadError::UnknownFormat(path) => write!(f, "unknown file format: `{}`, use `.toml` or `.json`", path.display()),
+            LoadError::UnknownFormat(path) => write!(f, "unknown file format: `{}`, use `.toml`, `.yaml` or `.json`", path.display()),
             LoadError::Invalid(path, msg) => write!(f, "in `{}`: {msg}", path.display()),
             LoadError::MissingSection(path, section) => write!(f, "`{}` should contain a section `{section}`", path.display()),
             LoadError::NoInput => write!(f,
@@ -54,16 +54,22 @@ impl fmt::Display for LoadError {
 Reading a file
 --------------
 
-Without a section, we deserialize the file directly, so that error messages point at the right line. To read a section, we first parse the file into a generic value, and look up the section in there.
+Without a section, we deserialize the file directly, so that error messages point at the right line. To read a section, we first parse the file into a generic value, and look up the section in there. YAML has no generic value type of its own here: we read it into a JSON value, and from there it's the same as JSON.
 
 ```rust
 //| id: loader-read
-/// Read a TOML or JSON file, or a section of it (`a.b` for nested sections).
+/// Read a TOML, YAML or JSON file, or a section of it (`a.b` for nested sections).
 pub fn read_from_file<T: DeserializeOwned>(path: &Path, section: Option<&str>) -> Result<T, LoadError> {
     let text = fs::read_to_string(path).map_err(|e| LoadError::Io(path.into(), e.to_string()))?;
     let invalid = |msg: String| LoadError::Invalid(path.into(), msg);
     let missing = || LoadError::MissingSection(path.into(), section.unwrap_or("").into());
     let keys = || section.into_iter().flat_map(|s| s.split('.'));
+    let json = |mut value: serde_json::Value| {
+        for key in keys() {
+            value = value.get_mut(key).ok_or_else(missing)?.take();
+        }
+        serde_json::from_value(value).map_err(|e| invalid(e.to_string()))
+    };
 
     match path.extension().and_then(|e| e.to_str()) {
         Some("toml") if section.is_none() => toml::from_str(&text).map_err(|e| invalid(e.to_string())),
@@ -74,13 +80,9 @@ pub fn read_from_file<T: DeserializeOwned>(path: &Path, section: Option<&str>) -
             }
             value.try_into().map_err(|e: toml::de::Error| invalid(e.to_string()))
         }
-        Some("json") => {
-            let mut value: serde_json::Value = serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))?;
-            for key in keys() {
-                value = value.get_mut(key).ok_or_else(missing)?.take();
-            }
-            serde_json::from_value(value).map_err(|e| invalid(e.to_string()))
-        }
+        Some("json") => json(serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))?),
+        Some("yaml" | "yml") if section.is_none() => serde_saphyr::from_str(&text).map_err(|e| invalid(e.to_string())),
+        Some("yaml" | "yml") => json(serde_saphyr::from_str(&text).map_err(|e| invalid(e.to_string()))?),
         _ => Err(LoadError::UnknownFormat(path.into())),
     }
 }
@@ -205,6 +207,36 @@ fn sample() {
 }
 ```
 
+The same parts of a program in YAML.
+
+```rust
+//| id: loader-tests
+#[test]
+fn yaml() {
+    let dir = TempDir::new().unwrap();
+    write(&dir, "workflow.yaml", r#"
+environment:
+  name: World
+task:
+  - stdout: var(greeting)
+    script: echo Hello
+template:
+  echo:
+    stdout: ${out}
+    script: echo ${greeting}, ${name}!
+call:
+  - template: echo
+    args: { out: "var(message)" }
+"#);
+    let program = read_program(dir.path(), Some("workflow.yaml")).unwrap();
+    let db = Arc::new(TaskDb::new(dir.path()));
+    let (mut kernel, worker) = (Kernel::new(), SingleWorker::new());
+    resolve(&db, &mut kernel, &worker, program, &load_include).unwrap();
+    let id = db.targets.lookup(&"var(message)".parse().unwrap()).unwrap();
+    assert_eq!(build(&db, &mut kernel, &worker, id).unwrap(), Value::Scalar("Hello, World!".into()));
+}
+```
+
 Unknown fields and wrong types are errors, with the file name in the message.
 
 ```rust
@@ -215,18 +247,19 @@ fn invalid() {
     write(&dir, "typo.toml", "[[task]]\nscirpt = \"echo\"\n");
     write(&dir, "join.toml", "[[call]]\ntemplate = \"t\"\nargs = {}\njoin = \"left\"\n");
     write(&dir, "list.json", r#"{"task": [{"creates": "a.txt"}]}"#);
-    write(&dir, "brei.yaml", "");
-    for file in ["typo.toml", "join.toml", "list.json"] {
+    write(&dir, "typo.yaml", "task:\n  - scirpt: echo\n");
+    write(&dir, "brei.ini", "");
+    for file in ["typo.toml", "join.toml", "list.json", "typo.yaml"] {
         let err = read_program(dir.path(), Some(file)).unwrap_err();
         assert!(matches!(err, LoadError::Invalid(..)), "{file}: {err}");
         assert!(err.to_string().starts_with(&format!("in `{}", dir.path().join(file).display())));
     }
-    assert!(matches!(read_program(dir.path(), Some("brei.yaml")), Err(LoadError::UnknownFormat(_))));
+    assert!(matches!(read_program(dir.path(), Some("brei.ini")), Err(LoadError::UnknownFormat(_))));
     assert!(matches!(read_program(dir.path(), Some("nothere.toml")), Err(LoadError::Io(..))));
 }
 ```
 
-Programs can be in a section of a file, also in JSON. Without an input file, `brei.toml` comes first, then `pyproject.toml`.
+Programs can be in a section of a file, also in JSON and YAML. Without an input file, `brei.toml` comes first, then `pyproject.toml`.
 
 ```rust
 //| id: loader-tests
@@ -245,6 +278,9 @@ fn sections() {
     write(&dir, "workflow.json", r#"{"a": {"b": {"include": ["json"]}}}"#);
     assert_eq!(read_program(dir.path(), Some("workflow.json[a.b]")).unwrap().include, ["json"]);
     assert!(matches!(read_program(dir.path(), Some("workflow.json[a.c]")), Err(LoadError::MissingSection(..))));
+    write(&dir, "workflow.yml", "a:\n  b:\n    include: [yaml]\n");
+    assert_eq!(read_program(dir.path(), Some("workflow.yml[a.b]")).unwrap().include, ["yaml"]);
+    assert!(matches!(read_program(dir.path(), Some("workflow.yml[a.c]")), Err(LoadError::MissingSection(..))));
     assert_eq!(read_program(dir.path(), Some("pyproject.toml[tool.brei]")).unwrap().include, ["pyproject"]);
     assert_eq!(split_input("a[b]c"), ("a[b]c", None));
 }

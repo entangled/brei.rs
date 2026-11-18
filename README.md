@@ -11,7 +11,7 @@ stdout = "hello.txt"
 script = "echo 'Hello, World!'"
 ```
 
-- No new syntax: workflows are TOML or JSON files.
+- No new syntax: workflows are TOML, YAML or JSON files.
 - Tasks run lazily and in parallel.
 - Templates, variables, includes and configurable runners.
 - A single executable, with no dependencies.

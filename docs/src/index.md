@@ -8,7 +8,7 @@ stdout = "hello.txt"
 script = "echo 'Hello, World!'"
 ```
 
-- No new syntax: programmable workflows in TOML or JSON files.
+- No new syntax: programmable workflows in TOML, YAML or JSON files.
 - Efficient: Runs tasks lazily and in parallel.
 - Feature complete: Supports templates, variables, includes and configurable runners.
 - No dependencies: Brei is a single executable.
@@ -232,7 +232,7 @@ List variables are kept simple on purpose:
 Brei has no functions to work on file names. Instead, have the listing print what the template needs, like the file names above. For anything more involved, generate a workflow and include it, see the next section.
 
 ## Includes
-You can include parts of a workflow from other files, both TOML and JSON.
+You can include parts of a workflow from other files, in TOML, YAML or JSON.
 
 ```toml
 #| file: examples/echo.toml

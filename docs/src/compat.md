@@ -17,6 +17,7 @@ These differences from the Python version are deliberate:
 - **Empty variables:** a scalar variable with empty output is `""`, where Python gives `None`.
 - **Variable rules:** a rule that writes to a variable always runs, also when the files it creates are up to date. Python skips it, and the variable has no value.
 - **History:** the history file is always used. The Python library can also run without one.
+- **YAML:** workflows can also be written in YAML (`.yaml` or `.yml`). Python Brei only reads TOML and JSON.
 
 Setup
 -----
