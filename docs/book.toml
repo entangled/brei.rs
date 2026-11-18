@@ -5,3 +5,12 @@ language = "en"
 
 [preprocessor.strip-frontmatter]
 command = "python3 ../scripts/mdbook_strip_frontmatter.py"
+
+[preprocessor.eval]
+command = "python3 ../scripts/mdbook_eval.py"
+setup = "cargo build --quiet --bin brei"
+path = ["../target/debug"]
+copy = ["../examples"]
+
+[output.html]
+additional-css = ["theme/eval.css"]

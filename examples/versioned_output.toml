@@ -1,0 +1,26 @@
+# ~/~ begin <<docs/src/index.md#examples/versioned_output.toml>>[init]
+[environment]
+data_dir = "./data"
+output_dir = "./output/${commit}"
+
+[[task]]
+stdout = "var(commit)"
+script = "git rev-parse HEAD"
+
+[[task]]
+creates = ["${output_dir}/data.h5"]
+requires = ["${data_dir}/input.h5", "#prepare"]
+runner = "python"
+path = "scripts/run.py"
+
+[[task]]
+name = "prepare"
+script = """
+mkdir -p ${output_dir}
+ln -sf ${output_dir} output/latest
+"""
+
+[[task]]
+name = "all"
+requires = ["${output_dir}/data.h5"]
+# ~/~ end

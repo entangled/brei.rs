@@ -1,0 +1,32 @@
+# ~/~ begin <<docs/src/index.md#examples/rot13.toml>>[init]
+[[task]]
+description = "Creating temporary directory"
+stdout = "var(dir)"
+script = "mktemp -d"
+
+[template.echo]
+stdout = "${stdout}"
+script = "echo ${text}"
+
+[template.rot13]
+stdout = "${stdout}"
+stdin = "${stdin}"
+script = "tr a-zA-Z n-za-mN-ZA-M"
+
+[[call]]
+template = "echo"
+  [call.args]
+  stdout = "${dir}/secret.txt"
+  text = "Uryyb, Jbeyq!"
+
+[[call]]
+template = "rot13"
+  [call.args]
+  stdin = "${dir}/secret.txt"
+  stdout = "${dir}/msg.txt"
+
+[[task]]
+name = "all"
+requires = ["${dir}/msg.txt"]
+script = "cat ${dir}/msg.txt"
+# ~/~ end

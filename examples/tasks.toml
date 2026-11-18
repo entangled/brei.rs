@@ -1,0 +1,14 @@
+# ~/~ begin <<docs/src/index.md#examples/tasks.toml>>[init]
+[[task]]
+creates = ["hello.txt"]
+runner = "bash"
+script = "echo 'Hello, World!' > hello.txt"
+
+[[task]]
+name = "all"
+requires = ["hello.txt"]
+
+[[task]]
+name = "clean"
+script = "rm hello.txt"
+# ~/~ end

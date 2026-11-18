@@ -1,0 +1,30 @@
+# ~/~ begin <<docs/src/index.md#examples/include-gen.toml>>[init]
+include = [
+    "${dir}/gen.json"
+]
+
+[[task]]
+description = "Creating temporary directory"
+stdout = "var(dir)"
+script = "mktemp -d"
+
+[[task]]
+description = "Generating workflow"
+stdout = "${dir}/gen.json"
+runner = "python"
+script = """
+import json
+tasks = [
+    {"stdout": f"${dir}/out{i}.dat",
+     "script": f"echo '{i}'"} for i in range(10)
+]
+tasks.append({"name": "write-outs", "requires": [
+    f"${dir}/out{i}.dat" for i in range(10)
+]})
+print(json.dumps({"task": tasks}))
+"""
+
+[[task]]
+name = "all"
+requires = ["#write-outs"]
+# ~/~ end

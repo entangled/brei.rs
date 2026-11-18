@@ -1,0 +1,15 @@
+# ~/~ begin <<docs/src/index.md#examples/hello-includes.toml>>[init]
+include = [
+    "./echo.toml"
+]
+
+[[call]]
+template = "echo"
+  [call.args]
+  stdout = "hello.txt"
+  text = "Hello, World!"
+
+[[task]]
+name = "all"
+requires = ["hello.txt"]
+# ~/~ end

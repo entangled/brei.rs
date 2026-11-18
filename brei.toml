@@ -1,0 +1,48 @@
+# ~/~ begin <<docs/src/index.md#brei.toml>>[init]
+[environment]
+ignore = "/.cargo/registry|/lib/rustlib/"
+
+[[task]]
+name = "coverage"
+description = "Coverage report"
+requires = ["docs/src/coverage/index.html"]
+script = "${llvm_bin}/llvm-cov report --ignore-filename-regex=${ignore} --instr-profile=cov/brei.profdata ${objects}"
+
+[[task]]
+description = "Finding the LLVM tools"
+stdout = "var(llvm_bin)"
+runner = "bash"
+script = '''echo "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"'''
+
+[[task]]
+description = "Running tests with coverage"
+creates = ["cov/brei.profdata"]
+force = true
+runner = "bash"
+script = '''
+set -e
+rm -rf cov/profraw
+LLVM_PROFILE_FILE="$(pwd)/cov/profraw/%p-%m.profraw" RUSTFLAGS="-C instrument-coverage" cargo test
+${llvm_bin}/llvm-profdata merge -sparse cov/profraw/*.profraw -o cov/brei.profdata
+'''
+
+[[task]]
+description = "Listing instrumented executables"
+stdout = "var(objects)"
+requires = ["cov/brei.profdata"]
+runner = "bash"
+script = '''
+LLVM_PROFILE_FILE=/dev/null RUSTFLAGS="-C instrument-coverage" cargo test --no-run --message-format=json \
+    | jq -j 'select(.reason == "compiler-artifact" and .executable != null) | "-object \(.executable) "'
+'''
+
+[[task]]
+description = "Writing HTML report"
+requires = ["cov/brei.profdata"]
+creates = ["docs/src/coverage/index.html"]
+script = "${llvm_bin}/llvm-cov show --format=html --project-title=Brei --output-dir=docs/src/coverage --ignore-filename-regex=${ignore} --instr-profile=cov/brei.profdata ${objects}"
+
+[[task]]
+name = "clean"
+script = "rm -rf cov docs/src/coverage"
+# ~/~ end
