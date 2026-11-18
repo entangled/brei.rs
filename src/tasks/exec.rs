@@ -59,7 +59,7 @@ impl TaskDb {
                 .collect();
         };
 
-        let runner = self.runners.get(name).ok_or_else(|| Failure::UnknownRunner(name.clone()))?;
+        let runner = self.runner(name).ok_or_else(|| Failure::UnknownRunner(name.clone()))?;
         let path: PathBuf = match (&rule.path, &rule.script) {
             (Some(path), _) => self.root.join(path),
             (None, Some(script)) => {

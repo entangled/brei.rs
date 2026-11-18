@@ -18,6 +18,7 @@ mod rule;
 mod db;
 mod template;
 mod history;
+mod program;
 mod exec;
 mod job;
 
@@ -29,6 +30,7 @@ pub use rule::{Rule, RuleError, Runner, Value, Failure, default_runners};
 pub use db::TaskDb;
 pub use template::RuleTemplate;
 pub use history::HISTORY_FILE;
+pub use program::{Program, Call, Argument, Join, ProgramError, resolve};
 pub use job::{Job, build, build_all};
 ```
 
@@ -592,13 +594,13 @@ A rule is stored as an `Entry`, with its targets interned. Entries are shared th
 
 The history remembers the digest of the rule that last created each file. It is shared by all tasks, which may run on different threads, so it is behind a `Mutex`. It is a `BTreeMap`, so that it is written to disk in a stable order.
 
-Recipes are added before running anything, so adding takes a `&mut` reference; once all recipes are in, the database goes into an `Arc` and is shared with the tasks. A target can only be created by one recipe.
+The database is shared with the tasks through an `Arc`. Recipes and runners can still be added while it is shared: reading a program needs to run some tasks before all recipes are known, for instance to compute the name of a file to include. So these are behind a `RwLock`, and recipes themselves are behind an `Arc`, so that a job can hold on to one. A target can only be created by one recipe.
 
 ```rust
 //| file: src/tasks/db.rs
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use super::rule::{Rule, RuleError, Runner, default_runners};
 use super::target::{Target, TargetId, Targets};
 use super::template::RuleTemplate;
@@ -624,13 +626,13 @@ impl Entry {
     }
 }
 
-pub(super) enum Kind {
+pub enum Kind {
     Rule(Arc<Entry>),
     Template(RuleTemplate),
     Variable(String),
 }
 
-pub(super) struct Recipe {
+pub struct Recipe {
     pub(super) creates: Vec<TargetId>,
     pub(super) requires: Vec<TargetId>,
     pub(super) kind: Kind,
@@ -639,10 +641,9 @@ pub(super) struct Recipe {
 pub struct TaskDb {
     pub root: PathBuf,
     pub targets: Targets,
-    pub runners: HashMap<String, Runner>,
     pub force_run: bool,
-    recipes: Vec<Recipe>,
-    index: HashMap<TargetId, usize>,
+    runners: RwLock<HashMap<String, Runner>>,
+    recipes: RwLock<HashMap<TargetId, Arc<Recipe>>>,
     pub(super) history: Mutex<BTreeMap<PathBuf, String>>,
 }
 
@@ -651,37 +652,51 @@ impl TaskDb {
         TaskDb {
             root: root.into(),
             targets: Targets::new(),
-            runners: default_runners(),
             force_run: false,
-            recipes: Vec::new(),
-            index: HashMap::new(),
+            runners: RwLock::new(default_runners()),
+            recipes: RwLock::new(HashMap::new()),
             history: Mutex::new(BTreeMap::new()),
         }
     }
 
-    pub fn add(&mut self, rule: Rule) -> Result<(), RuleError> {
+    pub fn add(&self, rule: Rule) -> Result<(), RuleError> {
         let entry = Entry::new(rule, &self.targets)?;
         self.insert(Recipe { creates: entry.creates.clone(), requires: entry.requires.clone(), kind: Kind::Rule(Arc::new(entry)) })
     }
 
-    pub(super) fn insert(&mut self, recipe: Recipe) -> Result<(), RuleError> {
-        if let Some(id) = recipe.creates.iter().find(|id| self.index.contains_key(id)) {
+    pub(super) fn insert(&self, recipe: Recipe) -> Result<(), RuleError> {
+        let mut recipes = self.recipes.write().unwrap();
+        if let Some(id) = recipe.creates.iter().find(|id| recipes.contains_key(id)) {
             return Err(RuleError::Duplicate(self.targets.get(*id)));
         }
-        let n = self.recipes.len();
+        let recipe = Arc::new(recipe);
         for id in &recipe.creates {
-            self.index.insert(*id, n);
+            recipes.insert(*id, recipe.clone());
         }
-        self.recipes.push(recipe);
         Ok(())
     }
 
-    pub(super) fn recipe_for(&self, target: TargetId) -> Option<usize> {
-        self.index.get(&target).copied()
+    pub(super) fn recipe_for(&self, target: TargetId) -> Option<Arc<Recipe>> {
+        self.recipes.read().unwrap().get(&target).cloned()
     }
 
-    pub(super) fn recipe(&self, n: usize) -> &Recipe {
-        &self.recipes[n]
+    /// Whether some recipe creates `target`.
+    pub fn creates(&self, target: &Target) -> bool {
+        self.targets.lookup(target).and_then(|id| self.recipe_for(id)).is_some()
+    }
+
+    pub fn add_runner(&self, name: &str, runner: Runner) {
+        self.runners.write().unwrap().insert(name.to_string(), runner);
+    }
+
+    pub fn runner(&self, name: &str) -> Option<Runner> {
+        self.runners.read().unwrap().get(name).cloned()
+    }
+
+    pub fn runner_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.runners.read().unwrap().keys().cloned().collect();
+        names.sort();
+        names
     }
 }
 ```
@@ -783,7 +798,20 @@ pub(super) fn substitute(s: &str, env: &Env) -> Result<String, Failure> {
     }))
 }
 
-fn splice_name(s: &str) -> Option<&str> {
+/// Substitute the variables in `env`, and leave the others. The values in `env` are template strings themselves, and so is the result.
+pub(super) fn fill(s: &str, env: &Env) -> String {
+    dollar(s).flatten().map(|item| match item {
+        Item::Variable(name) => env.get(name).cloned().unwrap_or_else(|| format!("${{{name}}}")),
+        Item::Literal(text) => escape(text),
+    }).collect()
+}
+
+/// A template string for the literal text `s`.
+pub(super) fn escape(s: &str) -> String {
+    s.replace('$', "$$")
+}
+
+pub(super) fn splice_name(s: &str) -> Option<&str> {
     wrapped(s, "splice")
 }
 
@@ -793,7 +821,7 @@ fn parse(s: String) -> Result<Target, Failure> {
 
 impl RuleTemplate {
     /// The targets: `creates`, `stdout` and the phony target `#name`.
-    fn targets(&self) -> Vec<String> {
+    pub(super) fn targets(&self) -> Vec<String> {
         self.creates.iter().cloned()
             .chain(self.stdout.clone())
             .chain(self.name.as_ref().map(|n| format!("#{n}")))
@@ -808,6 +836,37 @@ impl RuleTemplate {
     /// Names of the variables used in the template.
     pub fn variables(&self) -> BTreeSet<&str> {
         self.strings().flat_map(|s| variables(s)).collect()
+    }
+
+    /// Names of the variables used in the targets.
+    pub fn target_variables(&self) -> BTreeSet<&str> {
+        let fields = [&self.name, &self.stdout];
+        self.creates.iter().chain(fields.into_iter().flatten()).flat_map(|s| variables(s)).collect()
+    }
+
+    fn map(&self, target: impl Fn(&str) -> String, other: impl Fn(&str) -> String) -> RuleTemplate {
+        RuleTemplate {
+            creates: self.creates.iter().map(|s| target(s)).collect(),
+            requires: self.requires.iter().map(|s| other(s)).collect(),
+            name: self.name.as_deref().map(&target),
+            runner: self.runner.as_deref().map(&other),
+            path: self.path.as_deref().map(&other),
+            script: self.script.as_deref().map(&other),
+            stdin: self.stdin.as_deref().map(&other),
+            stdout: self.stdout.as_deref().map(&target),
+            description: self.description.as_deref().map(&other),
+            force: self.force,
+        }
+    }
+
+    /// Substitute the variables in `env` in all fields, leaving the others (see `fill`).
+    pub(super) fn fill(&self, env: &Env) -> RuleTemplate {
+        self.map(|s| fill(s, env), |s| fill(s, env))
+    }
+
+    /// Substitute the variables in `env` in the targets only.
+    pub(super) fn fill_targets(&self, env: &Env) -> RuleTemplate {
+        self.map(|s| fill(s, env), str::to_string)
     }
 
     /// Names of the list variables spliced into `requires`.
@@ -871,7 +930,7 @@ fn scalar(name: &str) -> Target {
 
 impl TaskDb {
     /// Add a rule that may use variables.
-    pub fn add_template(&mut self, template: RuleTemplate) -> Result<(), RuleError> {
+    pub fn add_template(&self, template: RuleTemplate) -> Result<(), RuleError> {
         template.check()?;
         let invalid = |f: Failure| RuleError::Invalid(f.to_string());
         let (vars, lists) = (template.variables(), template.splices());
@@ -893,7 +952,7 @@ impl TaskDb {
     }
 
     /// Add a variable whose value is a template string.
-    pub fn add_variable(&mut self, name: &str, template: &str) -> Result<(), RuleError> {
+    pub fn add_variable(&self, name: &str, template: &str) -> Result<(), RuleError> {
         let creates = vec![self.targets.intern(&scalar(name))?];
         let requires = variables(template).map(|v| self.targets.intern(&scalar(v))).collect::<Result<Vec<_>, _>>()?;
         self.insert(Recipe { creates, requires, kind: Kind::Variable(template.to_string()) })
@@ -982,7 +1041,7 @@ fn commands(&self, rule: &Rule, script_file: &mut Option<TempPath>) -> Result<Ve
             .collect();
     };
 
-    let runner = self.runners.get(name).ok_or_else(|| Failure::UnknownRunner(name.clone()))?;
+    let runner = self.runner(name).ok_or_else(|| Failure::UnknownRunner(name.clone()))?;
     let path: PathBuf = match (&rule.path, &rule.script) {
         (Some(path), _) => self.root.join(path),
         (None, Some(script)) => {
@@ -1143,14 +1202,14 @@ use std::sync::Arc;
 use crate::noodles::task::{Task, Response, Promise, CancelToken, Error, Worker};
 use crate::noodles::kernel::Kernel;
 use crate::template_strings::Env;
-use super::db::{Entry, Kind, TaskDb};
+use super::db::{Entry, Kind, Recipe, TaskDb};
 use super::rule::{Value, Failure};
 use super::target::{Target, TargetId, Key};
 use super::template::{substitute, Lists};
 
 pub enum Job {
     Build { db: Arc<TaskDb>, target: TargetId },
-    Expand { db: Arc<TaskDb>, recipe: usize, args: HashMap<TargetId, Value> },
+    Expand { db: Arc<TaskDb>, recipe: Arc<Recipe>, args: HashMap<TargetId, Value> },
     Run { db: Arc<TaskDb>, entry: Arc<Entry>, args: HashMap<TargetId, Value> },
     Alias { target: TargetId, value: Option<Value> },
     All { targets: Vec<TargetId>, done: HashSet<TargetId> },
@@ -1169,21 +1228,20 @@ fn after(db: &Arc<TaskDb>, deps: &[TargetId], last: Job) -> Response<Job> {
 }
 
 fn build_target(db: Arc<TaskDb>, target: TargetId) -> Response<Job> {
-    let Some(n) = db.recipe_for(target) else {
+    let Some(recipe) = db.recipe_for(target) else {
         return match db.targets.get(target) {
             Target::Path(p) if db.root.join(&p).exists() => Response::Value(Value::Nothing),
             t => Response::Error(Failure::Missing(t)),
         };
     };
 
-    let recipe = db.recipe(n);
     let main = recipe.creates[0];
     if main != target {
         return after(&db, &[main], Job::Alias { target: main, value: None });
     }
     let last = match &recipe.kind {
         Kind::Rule(entry) => Job::Run { db: db.clone(), entry: entry.clone(), args: HashMap::new() },
-        Kind::Template(_) | Kind::Variable(_) => Job::Expand { db: db.clone(), recipe: n, args: HashMap::new() },
+        Kind::Template(_) | Kind::Variable(_) => Job::Expand { db: db.clone(), recipe: recipe.clone(), args: HashMap::new() },
     };
     after(&db, &recipe.requires, last)
 }
@@ -1195,7 +1253,7 @@ To expand a template, we collect the values of the variables it uses. Variables 
 
 ```rust
 //| id: job-expand-run
-fn expand(db: Arc<TaskDb>, n: usize, args: HashMap<TargetId, Value>) -> Response<Job> {
+fn expand(db: Arc<TaskDb>, recipe: Arc<Recipe>, args: HashMap<TargetId, Value>) -> Response<Job> {
     let mut env = Env::new();
     let mut lists = Lists::new();
     for (id, value) in args {
@@ -1207,7 +1265,7 @@ fn expand(db: Arc<TaskDb>, n: usize, args: HashMap<TargetId, Value>) -> Response
         }
     }
 
-    let result = match &db.recipe(n).kind {
+    let result = match &recipe.kind {
         Kind::Variable(template) => substitute(template, &env).map(|s| Response::Value(Value::Scalar(s))),
         Kind::Template(template) => template.expand(&env, &lists)
             .and_then(|rule| Entry::new(rule, &db.targets).map_err(|e| Failure::Template(e.to_string())))
@@ -1246,7 +1304,7 @@ impl Task for Job {
     fn dependencies(&self) -> impl Iterator<Item=Key> {
         let deps: Vec<TargetId> = match self {
             Job::Build { .. } => Vec::new(),
-            Job::Expand { db, recipe, .. } => db.recipe(*recipe).requires.clone(),
+            Job::Expand { recipe, .. } => recipe.requires.clone(),
             Job::Run { entry, .. } => entry.requires.clone(),
             Job::Alias { target, .. } => vec![*target],
             Job::All { targets, .. } => targets.clone(),
@@ -1280,7 +1338,7 @@ impl Task for Job {
     fn ready(&self) -> bool {
         match self {
             Job::Build { .. } => true,
-            Job::Expand { db, recipe, args } => args.len() == db.recipe(*recipe).requires.len(),
+            Job::Expand { recipe, args, .. } => args.len() == recipe.requires.len(),
             Job::Run { entry, args, .. } => args.len() == entry.requires.len(),
             Job::Alias { value, .. } => value.is_some(),
             Job::All { targets, done } => done.len() == targets.len(),
@@ -1364,7 +1422,7 @@ A simple rule, and a chain of rules. The second time, nothing needs to be done. 
 #[test]
 fn hello() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(Rule { stdout: Some(target("hello.txt")), ..rule(&[], &[], "echo hello") }).unwrap();
     assert_eq!(run(&Arc::new(db), "hello.txt").unwrap(), Value::Nothing);
     assert_eq!(read(&dir, "hello.txt"), "hello\n");
@@ -1373,7 +1431,7 @@ fn hello() {
 #[test]
 fn up_to_date() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(bash(&["a.txt"], &[], "echo a >> log.txt; echo a > a.txt")).unwrap();
     db.add(bash(&["b.txt"], &["a.txt"], "echo b >> log.txt; cat a.txt > b.txt")).unwrap();
     let db = Arc::new(db);
@@ -1400,7 +1458,7 @@ Variables pass values between rules, through standard output and input.
 #[test]
 fn variables() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(Rule { stdout: Some(target("var(greeting)")), ..rule(&[], &[], "echo hello world") }).unwrap();
     db.add(Rule {
         stdin: Some(target("var(greeting)")),
@@ -1424,7 +1482,7 @@ A rule that creates several targets runs once, even when its targets are built i
 #[test]
 fn several_targets() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(bash(&["a.txt", "b.txt", "c.txt"], &[], "echo run >> log.txt; touch a.txt b.txt c.txt")).unwrap();
     db.add(Rule { name: Some("all".into()), requires: targets(&["a.txt", "b.txt", "c.txt"]), ..Default::default() }).unwrap();
     db.add(Rule { name: Some("answer".into()), stdout: Some(target("var(answer)")), ..rule(&[], &[], "echo 42") }).unwrap();
@@ -1447,7 +1505,7 @@ Dependencies that are files without a rule are fine, as long as they exist.
 fn missing_dependency() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("input.txt"), "data").unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(rule(&["copy.txt"], &["input.txt"], "cp input.txt copy.txt")).unwrap();
     db.add(rule(&["other.txt"], &["nothere.txt"], "touch other.txt")).unwrap();
     let db = Arc::new(db);
@@ -1466,7 +1524,7 @@ A failing command fails the rule, and so does a rule that doesn't create its tar
 #[test]
 fn failing_rules() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(rule(&["x.txt"], &[], "false")).unwrap();
     db.add(rule(&["y.txt"], &[], "true")).unwrap();
     db.add(rule(&["z.txt"], &[], "no-such-command")).unwrap();
@@ -1485,7 +1543,7 @@ When one rule fails, a slow command that runs in parallel is killed.
 #[test]
 fn cancel() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(rule(&["slow.txt"], &[], "sleep 10")).unwrap();
     db.add(rule(&["fail.txt"], &[], "false")).unwrap();
     db.add(Rule { name: Some("all".into()), requires: targets(&["slow.txt", "fail.txt"]), ..Default::default() }).unwrap();
@@ -1504,7 +1562,7 @@ Mistakes in rules are found when they are added.
 //| id: task-tests
 #[test]
 fn invalid_rules() {
-    let mut db = TaskDb::new(".");
+    let db = TaskDb::new(".");
     db.add(rule(&["a.txt"], &[], "true")).unwrap();
     assert_eq!(db.add(rule(&["a.txt"], &[], "true")), Err(RuleError::Duplicate(target("a.txt"))));
 
@@ -1534,7 +1592,7 @@ The history carries over to a new database, through the history file. A rule who
 fn persistent_history() {
     let dir = TempDir::new().unwrap();
     let rules = |script: &str| {
-        let mut db = TaskDb::new(dir.path());
+        let db = TaskDb::new(dir.path());
         db.add(bash(&["a.txt"], &[], &format!("echo {script} >> log.txt; echo {script} > a.txt"))).unwrap();
         db.add(bash(&["b.txt"], &[], "echo b >> log.txt; [ -e ok ] && touch b.txt")).unwrap();
         db.load_history(HISTORY_FILE).unwrap();
@@ -1573,7 +1631,7 @@ Several targets are built in one run, in parallel, sharing their dependencies. N
 #[test]
 fn build_several() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(bash(&["a.txt"], &[], "echo a >> log.txt; touch a.txt")).unwrap();
     db.add(bash(&["b.txt"], &["a.txt"], "touch b.txt")).unwrap();
     db.add(bash(&["c.txt"], &["a.txt"], "touch c.txt")).unwrap();
@@ -1610,7 +1668,7 @@ fn environment() {
     let dir = TempDir::new().unwrap();
     fs::create_dir(dir.path().join("data")).unwrap();
     fs::write(dir.path().join("data/input.txt"), "hello").unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add_variable("dir", "data").unwrap();
     db.add_variable("input", "${dir}/input.txt").unwrap();
     db.add(Rule { stdout: Some(target("var(output)")), ..rule(&[], &[], "echo output.txt") }).unwrap();
@@ -1630,7 +1688,7 @@ The output of a template rule can go to a variable, and the values of variables 
 #[test]
 fn template_variables() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add_variable("name", "greeting").unwrap();
     db.add(Rule { stdout: Some(target("var(greeting)")), ..rule(&[], &[], "echo hello") }).unwrap();
     db.add_template(RuleTemplate {
@@ -1652,7 +1710,7 @@ Splicing a list variable into `requires` makes all its elements dependencies. Th
 fn splice() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("c.txt"), "c\n").unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(Rule { stdout: Some(target("listvar(files)")), ..rule(&[], &[], r"printf 'a.txt\nb.txt\nc.txt\n'") }).unwrap();
     db.add(bash(&["a.txt"], &[], "echo a > a.txt")).unwrap();
     db.add(bash(&["b.txt"], &[], "echo b > b.txt")).unwrap();
@@ -1676,7 +1734,7 @@ Templates fail when the variables they use are missing. Mistakes are found when 
 #[test]
 fn invalid_templates() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add_template(template(&["a.txt"], &[], "touch ${unknown}")).unwrap();
     db.add_variable("x", "${y}").unwrap();
     assert_eq!(db.add_variable("x", "1"), Err(RuleError::Duplicate(target("var(x)"))));

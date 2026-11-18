@@ -46,7 +46,7 @@ fn failures(result: Result<Value, Error<Job>>) -> Vec<Failure> {
 #[test]
 fn hello() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(Rule { stdout: Some(target("hello.txt")), ..rule(&[], &[], "echo hello") }).unwrap();
     assert_eq!(run(&Arc::new(db), "hello.txt").unwrap(), Value::Nothing);
     assert_eq!(read(&dir, "hello.txt"), "hello\n");
@@ -55,7 +55,7 @@ fn hello() {
 #[test]
 fn up_to_date() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(bash(&["a.txt"], &[], "echo a >> log.txt; echo a > a.txt")).unwrap();
     db.add(bash(&["b.txt"], &["a.txt"], "echo b >> log.txt; cat a.txt > b.txt")).unwrap();
     let db = Arc::new(db);
@@ -78,7 +78,7 @@ fn up_to_date() {
 #[test]
 fn variables() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(Rule { stdout: Some(target("var(greeting)")), ..rule(&[], &[], "echo hello world") }).unwrap();
     db.add(Rule {
         stdin: Some(target("var(greeting)")),
@@ -98,7 +98,7 @@ fn variables() {
 #[test]
 fn several_targets() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(bash(&["a.txt", "b.txt", "c.txt"], &[], "echo run >> log.txt; touch a.txt b.txt c.txt")).unwrap();
     db.add(Rule { name: Some("all".into()), requires: targets(&["a.txt", "b.txt", "c.txt"]), ..Default::default() }).unwrap();
     db.add(Rule { name: Some("answer".into()), stdout: Some(target("var(answer)")), ..rule(&[], &[], "echo 42") }).unwrap();
@@ -117,7 +117,7 @@ fn several_targets() {
 fn missing_dependency() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("input.txt"), "data").unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(rule(&["copy.txt"], &["input.txt"], "cp input.txt copy.txt")).unwrap();
     db.add(rule(&["other.txt"], &["nothere.txt"], "touch other.txt")).unwrap();
     let db = Arc::new(db);
@@ -132,7 +132,7 @@ fn missing_dependency() {
 #[test]
 fn failing_rules() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(rule(&["x.txt"], &[], "false")).unwrap();
     db.add(rule(&["y.txt"], &[], "true")).unwrap();
     db.add(rule(&["z.txt"], &[], "no-such-command")).unwrap();
@@ -147,7 +147,7 @@ fn failing_rules() {
 #[test]
 fn cancel() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(rule(&["slow.txt"], &[], "sleep 10")).unwrap();
     db.add(rule(&["fail.txt"], &[], "false")).unwrap();
     db.add(Rule { name: Some("all".into()), requires: targets(&["slow.txt", "fail.txt"]), ..Default::default() }).unwrap();
@@ -162,7 +162,7 @@ fn cancel() {
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[6]
 #[test]
 fn invalid_rules() {
-    let mut db = TaskDb::new(".");
+    let db = TaskDb::new(".");
     db.add(rule(&["a.txt"], &[], "true")).unwrap();
     assert_eq!(db.add(rule(&["a.txt"], &[], "true")), Err(RuleError::Duplicate(target("a.txt"))));
 
@@ -187,7 +187,7 @@ fn invalid_rules() {
 fn persistent_history() {
     let dir = TempDir::new().unwrap();
     let rules = |script: &str| {
-        let mut db = TaskDb::new(dir.path());
+        let db = TaskDb::new(dir.path());
         db.add(bash(&["a.txt"], &[], &format!("echo {script} >> log.txt; echo {script} > a.txt"))).unwrap();
         db.add(bash(&["b.txt"], &[], "echo b >> log.txt; [ -e ok ] && touch b.txt")).unwrap();
         db.load_history(HISTORY_FILE).unwrap();
@@ -222,7 +222,7 @@ fn persistent_history() {
 #[test]
 fn build_several() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(bash(&["a.txt"], &[], "echo a >> log.txt; touch a.txt")).unwrap();
     db.add(bash(&["b.txt"], &["a.txt"], "touch b.txt")).unwrap();
     db.add(bash(&["c.txt"], &["a.txt"], "touch c.txt")).unwrap();
@@ -253,7 +253,7 @@ fn environment() {
     let dir = TempDir::new().unwrap();
     fs::create_dir(dir.path().join("data")).unwrap();
     fs::write(dir.path().join("data/input.txt"), "hello").unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add_variable("dir", "data").unwrap();
     db.add_variable("input", "${dir}/input.txt").unwrap();
     db.add(Rule { stdout: Some(target("var(output)")), ..rule(&[], &[], "echo output.txt") }).unwrap();
@@ -269,7 +269,7 @@ fn environment() {
 #[test]
 fn template_variables() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add_variable("name", "greeting").unwrap();
     db.add(Rule { stdout: Some(target("var(greeting)")), ..rule(&[], &[], "echo hello") }).unwrap();
     db.add_template(RuleTemplate {
@@ -287,7 +287,7 @@ fn template_variables() {
 fn splice() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("c.txt"), "c\n").unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add(Rule { stdout: Some(target("listvar(files)")), ..rule(&[], &[], r"printf 'a.txt\nb.txt\nc.txt\n'") }).unwrap();
     db.add(bash(&["a.txt"], &[], "echo a > a.txt")).unwrap();
     db.add(bash(&["b.txt"], &[], "echo b > b.txt")).unwrap();
@@ -307,7 +307,7 @@ fn splice() {
 #[test]
 fn invalid_templates() {
     let dir = TempDir::new().unwrap();
-    let mut db = TaskDb::new(dir.path());
+    let db = TaskDb::new(dir.path());
     db.add_template(template(&["a.txt"], &[], "touch ${unknown}")).unwrap();
     db.add_variable("x", "${y}").unwrap();
     assert_eq!(db.add_variable("x", "1"), Err(RuleError::Duplicate(target("var(x)"))));

@@ -38,7 +38,20 @@ pub(super) fn substitute(s: &str, env: &Env) -> Result<String, Failure> {
     }))
 }
 
-fn splice_name(s: &str) -> Option<&str> {
+/// Substitute the variables in `env`, and leave the others. The values in `env` are template strings themselves, and so is the result.
+pub(super) fn fill(s: &str, env: &Env) -> String {
+    dollar(s).flatten().map(|item| match item {
+        Item::Variable(name) => env.get(name).cloned().unwrap_or_else(|| format!("${{{name}}}")),
+        Item::Literal(text) => escape(text),
+    }).collect()
+}
+
+/// A template string for the literal text `s`.
+pub(super) fn escape(s: &str) -> String {
+    s.replace('$', "$$")
+}
+
+pub(super) fn splice_name(s: &str) -> Option<&str> {
     wrapped(s, "splice")
 }
 
@@ -48,7 +61,7 @@ fn parse(s: String) -> Result<Target, Failure> {
 
 impl RuleTemplate {
     /// The targets: `creates`, `stdout` and the phony target `#name`.
-    fn targets(&self) -> Vec<String> {
+    pub(super) fn targets(&self) -> Vec<String> {
         self.creates.iter().cloned()
             .chain(self.stdout.clone())
             .chain(self.name.as_ref().map(|n| format!("#{n}")))
@@ -63,6 +76,37 @@ impl RuleTemplate {
     /// Names of the variables used in the template.
     pub fn variables(&self) -> BTreeSet<&str> {
         self.strings().flat_map(|s| variables(s)).collect()
+    }
+
+    /// Names of the variables used in the targets.
+    pub fn target_variables(&self) -> BTreeSet<&str> {
+        let fields = [&self.name, &self.stdout];
+        self.creates.iter().chain(fields.into_iter().flatten()).flat_map(|s| variables(s)).collect()
+    }
+
+    fn map(&self, target: impl Fn(&str) -> String, other: impl Fn(&str) -> String) -> RuleTemplate {
+        RuleTemplate {
+            creates: self.creates.iter().map(|s| target(s)).collect(),
+            requires: self.requires.iter().map(|s| other(s)).collect(),
+            name: self.name.as_deref().map(&target),
+            runner: self.runner.as_deref().map(&other),
+            path: self.path.as_deref().map(&other),
+            script: self.script.as_deref().map(&other),
+            stdin: self.stdin.as_deref().map(&other),
+            stdout: self.stdout.as_deref().map(&target),
+            description: self.description.as_deref().map(&other),
+            force: self.force,
+        }
+    }
+
+    /// Substitute the variables in `env` in all fields, leaving the others (see `fill`).
+    pub(super) fn fill(&self, env: &Env) -> RuleTemplate {
+        self.map(|s| fill(s, env), |s| fill(s, env))
+    }
+
+    /// Substitute the variables in `env` in the targets only.
+    pub(super) fn fill_targets(&self, env: &Env) -> RuleTemplate {
+        self.map(|s| fill(s, env), str::to_string)
     }
 
     /// Names of the list variables spliced into `requires`.
@@ -126,7 +170,7 @@ fn scalar(name: &str) -> Target {
 
 impl TaskDb {
     /// Add a rule that may use variables.
-    pub fn add_template(&mut self, template: RuleTemplate) -> Result<(), RuleError> {
+    pub fn add_template(&self, template: RuleTemplate) -> Result<(), RuleError> {
         template.check()?;
         let invalid = |f: Failure| RuleError::Invalid(f.to_string());
         let (vars, lists) = (template.variables(), template.splices());
@@ -148,7 +192,7 @@ impl TaskDb {
     }
 
     /// Add a variable whose value is a template string.
-    pub fn add_variable(&mut self, name: &str, template: &str) -> Result<(), RuleError> {
+    pub fn add_variable(&self, name: &str, template: &str) -> Result<(), RuleError> {
         let creates = vec![self.targets.intern(&scalar(name))?];
         let requires = variables(template).map(|v| self.targets.intern(&scalar(v))).collect::<Result<Vec<_>, _>>()?;
         self.insert(Recipe { creates, requires, kind: Kind::Variable(template.to_string()) })

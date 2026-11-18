@@ -1,7 +1,7 @@
 To do
 =====
 
-The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding templates.
+The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding program resolution.
 
 Done so far
 -----------
@@ -31,31 +31,26 @@ Done so far
   - `TaskDb::add_template` checks the template. One without variables or splices is expanded right away (so `$$` becomes `$`) and added as a rule.
   - A template's targets must be fixed; variables in targets are an error here, to be handled by program resolution (item 4).
   - The `Expand` job substitutes, splices, interns the new rule at run time and continues with building its dependencies and running it. Expanded rules never enter the database, which answers the open question about interior mutability: the rule index stays frozen.
+- **Program resolution** (`program.md`, `src/tasks/program.rs`): `tasks::resolve` adds a `Program` (environment, runners, rules, templates, calls, includes) to the database, following Python's `resolve_tasks`.
+  - Recipes and runners in `TaskDb` are behind a `RwLock` (`add*` take `&self`), so resolution can add recipes to a database that is already in an `Arc`.
+  - Resolution builds variables and includes on the caller's kernel. Use the *same* kernel for the build afterwards: its memo keeps the values, so rules (think `mktemp -d`) don't run twice.
+  - Delayed rules only get their targets filled in during resolution; the rest of the rule stays a template that is expanded when it runs.
+  - `fill` substitutes some variables and leaves the others, keeping `$$` escapes intact. Python unescapes `$$` once per substitution, so a `$$` in a called template ends up as a variable there.
+  - Included programs are read by a function `&dyn Fn(&Path) -> Result<Program, String>` that the caller passes in.
 
 Remaining work
 --------------
 
-In the suggested order. Items 1 to 3 are done.
-
-### 4. Program resolution
-
-From `resolve_tasks` in `program.py`:
-
-- `call`: expand templates, with `join` being inner or outer (`TemplateCall.all_args`).
-- `include`: read further programs. An include may have to be built by a task first.
-- Delayed calls, and templates with templated targets, are resolved once their variables are known. `TaskDb::add_template` refuses variables in targets, so substitute those before adding.
-- An error if targets remain unresolvable.
-
-In Python this is a separate async pass before the build. It could also run as an engine computation, with includes and delayed templates as continuations.
+In the suggested order. Items 1 to 4 are done.
 
 ### 5. Loading programs
 
-`data.rs` and `program_loader.md` have the serde structs.
+`data.rs` and `program_loader.md` have the serde structs. These should become `Deserialize` for `tasks::Program`, `Call`, `Argument`, `Join`, `RuleTemplate` and `Runner` (`program.md`), and `data.rs` can then go. The loader for includes is the function passed to `tasks::resolve`.
 
 - Read TOML from a file, or from a section of `pyproject.toml` (`read_from_file` in `construct.py`).
 - Refuse unknown fields (Python uses `forbid_unknown_fields`).
 - Convert into `Rule` and `Runner`: there are two `Runner` types now, the serde one in `data.rs` and `tasks::Runner`.
-- Variable names used both as `var(x)` and `listvar(x)` give a `TypeMismatch` from `Targets::intern`. Report it as a user error that points at the rule.
+- Variable names used both as `var(x)` and `listvar(x)` give a `TypeMismatch` from `Targets::intern`. Report it as a user error that points at the rule. `ProgramError::Rule` doesn't say which rule yet.
 
 ### 6. CLI
 
@@ -67,7 +62,7 @@ In Python this is a separate async pass before the build. It could also run as a
 - `-j` jobs (the size of the `WorkerPool`);
 - `--list-runners`, `--version` and `--debug`.
 
-Probably use `clap`. Run with `WorkerPool` and `tasks::build_all`. Load the history before the run and save it afterwards, also when the run fails.
+Probably use `clap`. Run with `WorkerPool` and `tasks::build_all`. Load the history before resolving the program (resolution may run rules) and save it after the build, also when either fails. Resolve and build with the same kernel.
 
 ### 7. Logging
 

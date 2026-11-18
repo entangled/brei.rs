@@ -1,7 +1,7 @@
 // ~/~ begin <<docs/src/brei.md#brei::src/tasks/db.rs>>[init]
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use super::rule::{Rule, RuleError, Runner, default_runners};
 use super::target::{Target, TargetId, Targets};
 use super::template::RuleTemplate;
@@ -27,13 +27,13 @@ impl Entry {
     }
 }
 
-pub(super) enum Kind {
+pub enum Kind {
     Rule(Arc<Entry>),
     Template(RuleTemplate),
     Variable(String),
 }
 
-pub(super) struct Recipe {
+pub struct Recipe {
     pub(super) creates: Vec<TargetId>,
     pub(super) requires: Vec<TargetId>,
     pub(super) kind: Kind,
@@ -42,10 +42,9 @@ pub(super) struct Recipe {
 pub struct TaskDb {
     pub root: PathBuf,
     pub targets: Targets,
-    pub runners: HashMap<String, Runner>,
     pub force_run: bool,
-    recipes: Vec<Recipe>,
-    index: HashMap<TargetId, usize>,
+    runners: RwLock<HashMap<String, Runner>>,
+    recipes: RwLock<HashMap<TargetId, Arc<Recipe>>>,
     pub(super) history: Mutex<BTreeMap<PathBuf, String>>,
 }
 
@@ -54,37 +53,51 @@ impl TaskDb {
         TaskDb {
             root: root.into(),
             targets: Targets::new(),
-            runners: default_runners(),
             force_run: false,
-            recipes: Vec::new(),
-            index: HashMap::new(),
+            runners: RwLock::new(default_runners()),
+            recipes: RwLock::new(HashMap::new()),
             history: Mutex::new(BTreeMap::new()),
         }
     }
 
-    pub fn add(&mut self, rule: Rule) -> Result<(), RuleError> {
+    pub fn add(&self, rule: Rule) -> Result<(), RuleError> {
         let entry = Entry::new(rule, &self.targets)?;
         self.insert(Recipe { creates: entry.creates.clone(), requires: entry.requires.clone(), kind: Kind::Rule(Arc::new(entry)) })
     }
 
-    pub(super) fn insert(&mut self, recipe: Recipe) -> Result<(), RuleError> {
-        if let Some(id) = recipe.creates.iter().find(|id| self.index.contains_key(id)) {
+    pub(super) fn insert(&self, recipe: Recipe) -> Result<(), RuleError> {
+        let mut recipes = self.recipes.write().unwrap();
+        if let Some(id) = recipe.creates.iter().find(|id| recipes.contains_key(id)) {
             return Err(RuleError::Duplicate(self.targets.get(*id)));
         }
-        let n = self.recipes.len();
+        let recipe = Arc::new(recipe);
         for id in &recipe.creates {
-            self.index.insert(*id, n);
+            recipes.insert(*id, recipe.clone());
         }
-        self.recipes.push(recipe);
         Ok(())
     }
 
-    pub(super) fn recipe_for(&self, target: TargetId) -> Option<usize> {
-        self.index.get(&target).copied()
+    pub(super) fn recipe_for(&self, target: TargetId) -> Option<Arc<Recipe>> {
+        self.recipes.read().unwrap().get(&target).cloned()
     }
 
-    pub(super) fn recipe(&self, n: usize) -> &Recipe {
-        &self.recipes[n]
+    /// Whether some recipe creates `target`.
+    pub fn creates(&self, target: &Target) -> bool {
+        self.targets.lookup(target).and_then(|id| self.recipe_for(id)).is_some()
+    }
+
+    pub fn add_runner(&self, name: &str, runner: Runner) {
+        self.runners.write().unwrap().insert(name.to_string(), runner);
+    }
+
+    pub fn runner(&self, name: &str) -> Option<Runner> {
+        self.runners.read().unwrap().get(name).cloned()
+    }
+
+    pub fn runner_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.runners.read().unwrap().keys().cloned().collect();
+        names.sort();
+        names
     }
 }
 // ~/~ end

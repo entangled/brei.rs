@@ -6,6 +6,7 @@ mod rule;
 mod db;
 mod template;
 mod history;
+mod program;
 mod exec;
 mod job;
 
@@ -17,5 +18,6 @@ pub use rule::{Rule, RuleError, Runner, Value, Failure, default_runners};
 pub use db::TaskDb;
 pub use template::RuleTemplate;
 pub use history::HISTORY_FILE;
+pub use program::{Program, Call, Argument, Join, ProgramError, resolve};
 pub use job::{Job, build, build_all};
 // ~/~ end

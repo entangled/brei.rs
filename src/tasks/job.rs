@@ -4,14 +4,14 @@ use std::sync::Arc;
 use crate::noodles::task::{Task, Response, Promise, CancelToken, Error, Worker};
 use crate::noodles::kernel::Kernel;
 use crate::template_strings::Env;
-use super::db::{Entry, Kind, TaskDb};
+use super::db::{Entry, Kind, Recipe, TaskDb};
 use super::rule::{Value, Failure};
 use super::target::{Target, TargetId, Key};
 use super::template::{substitute, Lists};
 
 pub enum Job {
     Build { db: Arc<TaskDb>, target: TargetId },
-    Expand { db: Arc<TaskDb>, recipe: usize, args: HashMap<TargetId, Value> },
+    Expand { db: Arc<TaskDb>, recipe: Arc<Recipe>, args: HashMap<TargetId, Value> },
     Run { db: Arc<TaskDb>, entry: Arc<Entry>, args: HashMap<TargetId, Value> },
     Alias { target: TargetId, value: Option<Value> },
     All { targets: Vec<TargetId>, done: HashSet<TargetId> },
@@ -30,27 +30,26 @@ fn after(db: &Arc<TaskDb>, deps: &[TargetId], last: Job) -> Response<Job> {
 }
 
 fn build_target(db: Arc<TaskDb>, target: TargetId) -> Response<Job> {
-    let Some(n) = db.recipe_for(target) else {
+    let Some(recipe) = db.recipe_for(target) else {
         return match db.targets.get(target) {
             Target::Path(p) if db.root.join(&p).exists() => Response::Value(Value::Nothing),
             t => Response::Error(Failure::Missing(t)),
         };
     };
 
-    let recipe = db.recipe(n);
     let main = recipe.creates[0];
     if main != target {
         return after(&db, &[main], Job::Alias { target: main, value: None });
     }
     let last = match &recipe.kind {
         Kind::Rule(entry) => Job::Run { db: db.clone(), entry: entry.clone(), args: HashMap::new() },
-        Kind::Template(_) | Kind::Variable(_) => Job::Expand { db: db.clone(), recipe: n, args: HashMap::new() },
+        Kind::Template(_) | Kind::Variable(_) => Job::Expand { db: db.clone(), recipe: recipe.clone(), args: HashMap::new() },
     };
     after(&db, &recipe.requires, last)
 }
 
 // ~/~ begin <<docs/src/brei.md#brei::job-expand-run>>[init]
-fn expand(db: Arc<TaskDb>, n: usize, args: HashMap<TargetId, Value>) -> Response<Job> {
+fn expand(db: Arc<TaskDb>, recipe: Arc<Recipe>, args: HashMap<TargetId, Value>) -> Response<Job> {
     let mut env = Env::new();
     let mut lists = Lists::new();
     for (id, value) in args {
@@ -62,7 +61,7 @@ fn expand(db: Arc<TaskDb>, n: usize, args: HashMap<TargetId, Value>) -> Response
         }
     }
 
-    let result = match &db.recipe(n).kind {
+    let result = match &recipe.kind {
         Kind::Variable(template) => substitute(template, &env).map(|s| Response::Value(Value::Scalar(s))),
         Kind::Template(template) => template.expand(&env, &lists)
             .and_then(|rule| Entry::new(rule, &db.targets).map_err(|e| Failure::Template(e.to_string())))
@@ -101,7 +100,7 @@ impl Task for Job {
     fn dependencies(&self) -> impl Iterator<Item=Key> {
         let deps: Vec<TargetId> = match self {
             Job::Build { .. } => Vec::new(),
-            Job::Expand { db, recipe, .. } => db.recipe(*recipe).requires.clone(),
+            Job::Expand { recipe, .. } => recipe.requires.clone(),
             Job::Run { entry, .. } => entry.requires.clone(),
             Job::Alias { target, .. } => vec![*target],
             Job::All { targets, .. } => targets.clone(),
@@ -135,7 +134,7 @@ impl Task for Job {
     fn ready(&self) -> bool {
         match self {
             Job::Build { .. } => true,
-            Job::Expand { db, recipe, args } => args.len() == db.recipe(*recipe).requires.len(),
+            Job::Expand { recipe, args, .. } => args.len() == recipe.requires.len(),
             Job::Run { entry, args, .. } => args.len() == entry.requires.len(),
             Job::Alias { value, .. } => value.is_some(),
             Job::All { targets, done } => done.len() == targets.len(),
