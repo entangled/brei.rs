@@ -2,6 +2,8 @@
 
 - [Introduction](./index.md)
 
+- [Workflow Reference](./reference.md)
+
 - [Architecture](./architecture.md)
 
   - [Main Module](./main_module.md)
