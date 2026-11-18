@@ -17,3 +17,7 @@ additional-css = ["theme/eval.css"]
 site-url = "/brei.rs/"
 git-repository-url = "https://github.com/entangled/brei.rs"
 edit-url-template = "https://github.com/entangled/brei.rs/edit/main/docs/{path}"
+
+[output.html.fold]
+enable = true
+level = 0
