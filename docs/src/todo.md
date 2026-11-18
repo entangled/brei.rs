@@ -1,7 +1,7 @@
 To do
 =====
 
-The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding the persistent history.
+The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding `build_all`.
 
 Done so far
 -----------
@@ -24,15 +24,12 @@ Done so far
   - Engine jobs: `Build` (memoized per target), `Run` and `Alias`. A rule with several targets runs once.
   - The entry point is `tasks::build`.
 - **Persistent history** (`brei.md`, `src/tasks/history.rs`): `TaskDb::load_history` and `save_history` read and write a JSON file (`HISTORY_FILE`, `.brei_history`) that maps paths to digests. A missing file is an empty history; saving writes a temporary file and renames it. This is not compatible with Python history files that contain `null` digests.
+- **Several targets** (`brei.md`, `src/tasks/job.rs`): `tasks::build_all` builds a list of targets in one run, through a local `Job::All` that waits for all of them. Its result is `()`; use `build` for the value of a single target.
 
 Remaining work
 --------------
 
-In the suggested order. Item 1, the persistent history, is done.
-
-### 2. Building several targets
-
-`tasks::build` takes a single target. The CLI needs to build several at once. Give the top-level promise one `Build` per target, plus a local root that depends on all of them. Until then, a phony target that requires the others does the same.
+In the suggested order. Items 1 (persistent history) and 2 (building several targets) are done.
 
 ### 3. Variables and templates
 
@@ -74,7 +71,7 @@ In Python this is a separate async pass before the build. It could also run as a
 - `-j` jobs (the size of the `WorkerPool`);
 - `--list-runners`, `--version` and `--debug`.
 
-Probably use `clap`. Run with `WorkerPool`. Load the history before the run and save it afterwards, also when the run fails.
+Probably use `clap`. Run with `WorkerPool` and `tasks::build_all`. Load the history before the run and save it afterwards, also when the run fails.
 
 ### 7. Logging
 

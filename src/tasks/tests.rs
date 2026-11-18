@@ -218,4 +218,28 @@ fn persistent_history() {
     assert!(TaskDb::new(dir.path()).load_history(HISTORY_FILE).is_err());
 }
 // ~/~ end
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[8]
+#[test]
+fn build_several() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(bash(&["a.txt"], &[], "echo a >> log.txt; touch a.txt")).unwrap();
+    db.add(bash(&["b.txt"], &["a.txt"], "touch b.txt")).unwrap();
+    db.add(bash(&["c.txt"], &["a.txt"], "touch c.txt")).unwrap();
+    db.add(rule(&["x.txt"], &[], "false")).unwrap();
+    let db = Arc::new(db);
+    let ids = |ts: &[&str]| ts.iter().map(|t| db.targets.lookup(&target(t)).unwrap()).collect::<Vec<_>>();
+
+    build_all(&db, &mut Kernel::new(), &WorkerPool::new(4), &ids(&["b.txt", "c.txt", "b.txt"])).unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\n");
+    assert!(dir.path().join("b.txt").exists() && dir.path().join("c.txt").exists());
+    build_all(&db, &mut Kernel::new(), &SingleWorker::new(), &[]).unwrap();
+
+    fs::remove_file(dir.path().join("b.txt")).unwrap();
+    fs::remove_file(dir.path().join("c.txt")).unwrap();
+    let result = build_all(&db, &mut Kernel::new().keep_going(), &SingleWorker::new(), &ids(&["x.txt", "b.txt", "c.txt"]));
+    assert_eq!(failures(result.map(|_| Value::Nothing)), [Failure::Command { command: "false".into(), code: Some(1) }]);
+    assert!(dir.path().join("b.txt").exists() && dir.path().join("c.txt").exists());
+}
+// ~/~ end
 // ~/~ end

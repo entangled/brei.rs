@@ -1,5 +1,5 @@
 // ~/~ begin <<docs/src/brei.md#brei::src/tasks/job.rs>>[init]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use crate::noodles::task::{Task, Response, Promise, CancelToken, Error, Worker};
 use crate::noodles::kernel::Kernel;
@@ -11,6 +11,7 @@ pub enum Job {
     Build { db: Arc<TaskDb>, target: TargetId },
     Run { db: Arc<TaskDb>, rule: usize, deps: Vec<TargetId>, args: HashMap<TargetId, Value> },
     Alias { target: TargetId, value: Option<Value> },
+    All { targets: Vec<TargetId>, done: HashSet<TargetId> },
 }
 
 impl Job {
@@ -59,7 +60,7 @@ impl Task for Job {
     fn key(&self) -> Key {
         match self {
             Job::Build { target, .. } => Key::Target(*target),
-            Job::Run { .. } | Job::Alias { .. } => Key::Local(0),
+            Job::Run { .. } | Job::Alias { .. } | Job::All { .. } => Key::Local(0),
         }
     }
 
@@ -68,6 +69,7 @@ impl Task for Job {
             Job::Build { .. } => Vec::new(),
             Job::Run { deps, .. } => deps.iter().map(|d| Key::Target(*d)).collect(),
             Job::Alias { target, .. } => vec![Key::Target(*target)],
+            Job::All { targets, .. } => targets.iter().map(|t| Key::Target(*t)).collect(),
         };
         deps.into_iter()
     }
@@ -81,6 +83,7 @@ impl Task for Job {
             Job::Build { db, target } => build_target(db, target),
             Job::Run { db, rule, args, .. } => run_rule(db, rule, args, cancel),
             Job::Alias { value, .. } => Response::Value(value.expect("alias is ready")),
+            Job::All { .. } => Response::Value(Value::Nothing),
         }
     }
 
@@ -88,6 +91,7 @@ impl Task for Job {
         match (self, key) {
             (Job::Run { args, .. }, Key::Target(id)) => { args.insert(id, value); }
             (Job::Alias { value: v, .. }, _) => *v = Some(value),
+            (Job::All { done, .. }, Key::Target(id)) => { done.insert(id); }
             _ => {}
         }
     }
@@ -97,6 +101,7 @@ impl Task for Job {
             Job::Build { .. } => true,
             Job::Run { deps, args, .. } => args.len() == deps.len(),
             Job::Alias { value, .. } => value.is_some(),
+            Job::All { targets, done } => done.len() == targets.len(),
         }
     }
 }
@@ -104,5 +109,15 @@ impl Task for Job {
 /// Build a target, giving its value.
 pub fn build<W: Worker<Job>>(db: &Arc<TaskDb>, kernel: &mut Kernel<Job>, worker: &W, target: TargetId) -> Result<Value, Error<Job>> {
     kernel.run(worker, Box::new(Promise::new(Key::Target(target), [Job::build(db, target)])))
+}
+
+/// Build several targets at once.
+pub fn build_all<W: Worker<Job>>(db: &Arc<TaskDb>, kernel: &mut Kernel<Job>, worker: &W, targets: &[TargetId]) -> Result<(), Error<Job>> {
+    let mut targets = targets.to_vec();
+    targets.sort();
+    targets.dedup();
+    let mut jobs: Vec<Job> = targets.iter().map(|t| Job::build(db, *t)).collect();
+    jobs.push(Job::All { targets, done: HashSet::new() });
+    kernel.run(worker, Box::new(Promise::new(Key::Local(0), jobs))).map(|_| ())
 }
 // ~/~ end

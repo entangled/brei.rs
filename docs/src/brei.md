@@ -27,7 +27,7 @@ pub use target::{Target, VarType, TargetId, Targets, Key, EmptyTarget, TypeMisma
 pub use rule::{Rule, RuleError, Runner, Value, Failure, default_runners};
 pub use db::TaskDb;
 pub use history::HISTORY_FILE;
-pub use job::{Job, build};
+pub use job::{Job, build, build_all};
 ```
 
 Targets
@@ -925,15 +925,16 @@ fn run_command(mut cmd: Command, display: &str, input: Option<&str>, cancel: &Ca
 Engine tasks
 ------------
 
-Now we can put rules on the engine. There are three kinds of jobs:
+Now we can put rules on the engine. There are four kinds of jobs:
 
 - `Build` a target, with the target as its key. This job is memoized, so every target is built at most once. If no rule creates the target, it should be a file that already exists. Otherwise, the result is a continuation: building each dependency, followed by running the rule;
 - `Run` a rule, once its dependencies are built. This has a local key, and receives the values of all dependencies. The only value it uses is that of a variable on `stdin`;
-- `Alias` a target to another. A rule can create several targets, but we want to run it only once. So the first target is the main one: building any other target of the rule gives a continuation that builds the main target, followed by an alias that passes on its value.
+- `Alias` a target to another. A rule can create several targets, but we want to run it only once. So the first target is the main one: building any other target of the rule gives a continuation that builds the main target, followed by an alias that passes on its value;
+- `All` waits for several targets, so that we can build them in one go. Its value is `Nothing`.
 
 ```rust
 //| file: src/tasks/job.rs
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use crate::noodles::task::{Task, Response, Promise, CancelToken, Error, Worker};
 use crate::noodles::kernel::Kernel;
@@ -945,6 +946,7 @@ pub enum Job {
     Build { db: Arc<TaskDb>, target: TargetId },
     Run { db: Arc<TaskDb>, rule: usize, deps: Vec<TargetId>, args: HashMap<TargetId, Value> },
     Alias { target: TargetId, value: Option<Value> },
+    All { targets: Vec<TargetId>, done: HashSet<TargetId> },
 }
 
 impl Job {
@@ -993,7 +995,7 @@ impl Task for Job {
     fn key(&self) -> Key {
         match self {
             Job::Build { target, .. } => Key::Target(*target),
-            Job::Run { .. } | Job::Alias { .. } => Key::Local(0),
+            Job::Run { .. } | Job::Alias { .. } | Job::All { .. } => Key::Local(0),
         }
     }
 
@@ -1002,6 +1004,7 @@ impl Task for Job {
             Job::Build { .. } => Vec::new(),
             Job::Run { deps, .. } => deps.iter().map(|d| Key::Target(*d)).collect(),
             Job::Alias { target, .. } => vec![Key::Target(*target)],
+            Job::All { targets, .. } => targets.iter().map(|t| Key::Target(*t)).collect(),
         };
         deps.into_iter()
     }
@@ -1015,6 +1018,7 @@ impl Task for Job {
             Job::Build { db, target } => build_target(db, target),
             Job::Run { db, rule, args, .. } => run_rule(db, rule, args, cancel),
             Job::Alias { value, .. } => Response::Value(value.expect("alias is ready")),
+            Job::All { .. } => Response::Value(Value::Nothing),
         }
     }
 
@@ -1022,6 +1026,7 @@ impl Task for Job {
         match (self, key) {
             (Job::Run { args, .. }, Key::Target(id)) => { args.insert(id, value); }
             (Job::Alias { value: v, .. }, _) => *v = Some(value),
+            (Job::All { done, .. }, Key::Target(id)) => { done.insert(id); }
             _ => {}
         }
     }
@@ -1031,6 +1036,7 @@ impl Task for Job {
             Job::Build { .. } => true,
             Job::Run { deps, args, .. } => args.len() == deps.len(),
             Job::Alias { value, .. } => value.is_some(),
+            Job::All { targets, done } => done.len() == targets.len(),
         }
     }
 }
@@ -1038,6 +1044,16 @@ impl Task for Job {
 /// Build a target, giving its value.
 pub fn build<W: Worker<Job>>(db: &Arc<TaskDb>, kernel: &mut Kernel<Job>, worker: &W, target: TargetId) -> Result<Value, Error<Job>> {
     kernel.run(worker, Box::new(Promise::new(Key::Target(target), [Job::build(db, target)])))
+}
+
+/// Build several targets at once.
+pub fn build_all<W: Worker<Job>>(db: &Arc<TaskDb>, kernel: &mut Kernel<Job>, worker: &W, targets: &[TargetId]) -> Result<(), Error<Job>> {
+    let mut targets = targets.to_vec();
+    targets.sort();
+    targets.dedup();
+    let mut jobs: Vec<Job> = targets.iter().map(|t| Job::build(db, *t)).collect();
+    jobs.push(Job::All { targets, done: HashSet::new() });
+    kernel.run(worker, Box::new(Promise::new(Key::Local(0), jobs))).map(|_| ())
 }
 ```
 
@@ -1300,5 +1316,33 @@ fn persistent_history() {
 
     fs::write(dir.path().join(HISTORY_FILE), "not json").unwrap();
     assert!(TaskDb::new(dir.path()).load_history(HISTORY_FILE).is_err());
+}
+```
+
+Several targets are built in one run, in parallel, sharing their dependencies. Naming a target twice is fine. With `keep_going`, a failing target doesn't stop the others.
+
+```rust
+//| id: task-tests
+#[test]
+fn build_several() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(bash(&["a.txt"], &[], "echo a >> log.txt; touch a.txt")).unwrap();
+    db.add(bash(&["b.txt"], &["a.txt"], "touch b.txt")).unwrap();
+    db.add(bash(&["c.txt"], &["a.txt"], "touch c.txt")).unwrap();
+    db.add(rule(&["x.txt"], &[], "false")).unwrap();
+    let db = Arc::new(db);
+    let ids = |ts: &[&str]| ts.iter().map(|t| db.targets.lookup(&target(t)).unwrap()).collect::<Vec<_>>();
+
+    build_all(&db, &mut Kernel::new(), &WorkerPool::new(4), &ids(&["b.txt", "c.txt", "b.txt"])).unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\n");
+    assert!(dir.path().join("b.txt").exists() && dir.path().join("c.txt").exists());
+    build_all(&db, &mut Kernel::new(), &SingleWorker::new(), &[]).unwrap();
+
+    fs::remove_file(dir.path().join("b.txt")).unwrap();
+    fs::remove_file(dir.path().join("c.txt")).unwrap();
+    let result = build_all(&db, &mut Kernel::new().keep_going(), &SingleWorker::new(), &ids(&["x.txt", "b.txt", "c.txt"]));
+    assert_eq!(failures(result.map(|_| Value::Nothing)), [Failure::Command { command: "false".into(), code: Some(1) }]);
+    assert!(dir.path().join("b.txt").exists() && dir.path().join("c.txt").exists());
 }
 ```
