@@ -339,6 +339,27 @@ mod tests {
     }
     // ~/~ end
     // ~/~ begin <<docs/src/engine.md#mock-tests>>[13]
+    fn failing_next_to_fibonacci() -> Box<Promise<Mock>> {
+        promise(SUM, vec![
+            Mock::new(100, &[], |_| Response::Error("failed".into())),
+            fibonacci_memo(10, Arc::new(AtomicUsize::new(0))),
+            binop(SUM, 100, 10, |a, b| a + b),
+        ])
+    }
+
+    #[test]
+    fn keep_going() {
+        let worker = SingleWorker::new();
+        let mut kernel = Kernel::new().keep_going();
+        assert!(matches!(kernel.run(&worker, failing_next_to_fibonacci()), Err(Error::Jobs(e)) if e == ["failed"]));
+        assert_eq!(kernel.memo_count(), 11);
+
+        let mut kernel = Kernel::new();
+        assert!(matches!(kernel.run(&worker, failing_next_to_fibonacci()), Err(Error::Jobs(e)) if e == ["failed"]));
+        assert!(kernel.memo_count() < 11);
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[14]
     #[test]
     fn keep_going_collects_errors() {
         let deep_error = Mock::new(2, &[], |_| Response::Continuation(promise(1, vec![
@@ -356,7 +377,7 @@ mod tests {
         assert_eq!(errors, ["deep", "shallow"]);
     }
     // ~/~ end
-    // ~/~ begin <<docs/src/engine.md#mock-tests>>[14]
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[15]
     #[test]
     fn pool_cancel() {
         let barrier = Arc::new(Barrier::new(2));

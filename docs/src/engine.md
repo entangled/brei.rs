@@ -1122,7 +1122,6 @@ fn pool_panic() {
     let _ = eval_pool(promise(1, vec![Mock::new(1, &[], |_| panic!("boom"))]));
 }
 ```
-```
 
 ### Failure and cancellation
 
