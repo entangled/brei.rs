@@ -14,3 +14,4 @@ copy = ["../examples"]
 
 [output.html]
 additional-css = ["theme/eval.css"]
+site-url = "/brei.rs/"
