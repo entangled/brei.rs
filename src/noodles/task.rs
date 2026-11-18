@@ -72,6 +72,55 @@ impl<T: Task> Promise<T> {
         }
         Promise { root, tasks, inverse_deps }
     }
+
+    /// A cycle of tasks in this promise that wait for each other, if there is one. Each task in the cycle waits for the next, and the last waits for the first.
+    pub fn cycle(&self) -> Option<Vec<T::Key>> {
+        enum Mark { Active, Done }
+        // Only tasks that aren't ready yet wait for anything.
+        let waits_for = |key: &T::Key| -> Vec<T::Key> {
+            match self.tasks.get(key) {
+                Some(task) if !task.ready() => task.dependencies().filter(|d| self.tasks.contains_key(d)).collect(),
+                _ => Vec::new(),
+            }
+        };
+
+        // A single task can only wait for itself; this saves some work in loops of tail calls.
+        if self.tasks.len() == 1 {
+            let key = self.tasks.keys().next().unwrap();
+            return waits_for(key).contains(key).then(|| vec![*key]);
+        }
+
+        let mut marks: HashMap<T::Key, Mark> = HashMap::new();
+        for start in self.tasks.keys() {
+            if marks.contains_key(start) {
+                continue;
+            }
+            marks.insert(*start, Mark::Active);
+            let mut path = vec![*start];
+            let mut todo = vec![waits_for(start).into_iter()];
+            while let Some(deps) = todo.last_mut() {
+                match deps.next() {
+                    Some(dep) => match marks.get(&dep) {
+                        Some(Mark::Active) => {
+                            let i = path.iter().position(|k| *k == dep).unwrap();
+                            return Some(path.split_off(i));
+                        }
+                        Some(Mark::Done) => {}
+                        None => {
+                            marks.insert(dep, Mark::Active);
+                            path.push(dep);
+                            todo.push(waits_for(&dep).into_iter());
+                        }
+                    },
+                    None => {
+                        marks.insert(path.pop().unwrap(), Mark::Done);
+                        todo.pop();
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 pub trait Worker<T: Task> {

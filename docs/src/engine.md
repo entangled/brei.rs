@@ -91,6 +91,55 @@ impl<T: Task> Promise<T> {
         }
         Promise { root, tasks, inverse_deps }
     }
+
+    /// A cycle of tasks in this promise that wait for each other, if there is one. Each task in the cycle waits for the next, and the last waits for the first.
+    pub fn cycle(&self) -> Option<Vec<T::Key>> {
+        enum Mark { Active, Done }
+        // Only tasks that aren't ready yet wait for anything.
+        let waits_for = |key: &T::Key| -> Vec<T::Key> {
+            match self.tasks.get(key) {
+                Some(task) if !task.ready() => task.dependencies().filter(|d| self.tasks.contains_key(d)).collect(),
+                _ => Vec::new(),
+            }
+        };
+
+        // A single task can only wait for itself; this saves some work in loops of tail calls.
+        if self.tasks.len() == 1 {
+            let key = self.tasks.keys().next().unwrap();
+            return waits_for(key).contains(key).then(|| vec![*key]);
+        }
+
+        let mut marks: HashMap<T::Key, Mark> = HashMap::new();
+        for start in self.tasks.keys() {
+            if marks.contains_key(start) {
+                continue;
+            }
+            marks.insert(*start, Mark::Active);
+            let mut path = vec![*start];
+            let mut todo = vec![waits_for(start).into_iter()];
+            while let Some(deps) = todo.last_mut() {
+                match deps.next() {
+                    Some(dep) => match marks.get(&dep) {
+                        Some(Mark::Active) => {
+                            let i = path.iter().position(|k| *k == dep).unwrap();
+                            return Some(path.split_off(i));
+                        }
+                        Some(Mark::Done) => {}
+                        None => {
+                            marks.insert(dep, Mark::Active);
+                            path.push(dep);
+                            todo.push(waits_for(&dep).into_iter());
+                        }
+                    },
+                    None => {
+                        marks.insert(path.pop().unwrap(), Mark::Done);
+                        todo.pop();
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 pub trait Worker<T: Task> {
@@ -160,7 +209,7 @@ A memoized task that, through its continuation, ends up waiting for itself would
 
 Edges for a memoized key are removed once its value is known, so the graph only contains the computations that are still running.
 
-Cycles between local tasks in a single promise are not detected: those tasks will never be ready, and the run ends with `NoResult`.
+Tasks within a single promise can also wait for each other in a loop. Those tasks would never be ready, so the kernel checks every promise it adds, with a depth-first search over the dependencies between its tasks. A loop is reported as `Error::Cycle` too. Tasks that are ready don't wait for anything, so they can't be part of a loop.
 
 ### Implementation
 
@@ -270,6 +319,10 @@ impl<T: Task> Kernel<T> {
     fn add<W: Worker<T>>(&mut self, worker: &W, parent: Option<(u64, T::Key)>, mut promise: Box<Promise<T>>) -> Result<(), Error<T>> {
         let frame_id = self.frame_no;
         self.frame_no += 1;
+
+        if let Some(cycle) = promise.cycle() {
+            return Err(Error::Cycle(cycle));
+        }
 
         let enclosing = match parent {
             Some((p, k)) if self.owns(p, k) => Some(k),
@@ -973,6 +1026,30 @@ fn needs(key: u64, dep: u64) -> Mock {
 #[test]
 fn indirect_cycle() {
     assert!(matches!(eval(promise(1, vec![needs(1, 2)])), Err(Error::Cycle(c)) if c == [1, 2]));
+}
+```
+
+Tasks in one promise that wait for each other are a cycle too, whether they are memoized or not. The cycle is found when the promise is added, also when it comes from a continuation. Tasks outside the cycle that depend on it are not part of it.
+
+```rust
+//| id: mock-tests
+#[test]
+fn local_cycle() {
+    let looping = || vec![
+        Mock::new(1, &[2], |x| Response::Value(x[0])),
+        Mock::new(2, &[3], |x| Response::Value(x[0])),
+        Mock::new(3, &[2], |x| Response::Value(x[0])).memoized(),
+        Mock::new(4, &[4], |x| Response::Value(x[0])),
+    ];
+    let is_cycle = |c: &[u64]| c == [2, 3] || c == [3, 2] || c == [4];
+    assert!(matches!(eval(promise(1, looping())), Err(Error::Cycle(c)) if is_cycle(&c)));
+
+    let continued = Mock::new(0, &[], move |_| Response::Continuation(promise(1, looping())));
+    assert!(matches!(eval_pool(promise(0, vec![continued])), Err(Error::Cycle(c)) if is_cycle(&c)));
+
+    let add = |key, a, b| binop(key, a, b, |x, y| x + y);
+    let diamond = vec![constant(1, 1), add(2, 1, 1), add(3, 1, 2), add(4, 2, 3)];
+    assert_eq!(eval(promise(4, diamond)).unwrap(), 5);
 }
 ```
 

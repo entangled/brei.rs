@@ -102,6 +102,10 @@ impl<T: Task> Kernel<T> {
         let frame_id = self.frame_no;
         self.frame_no += 1;
 
+        if let Some(cycle) = promise.cycle() {
+            return Err(Error::Cycle(cycle));
+        }
+
         let enclosing = match parent {
             Some((p, k)) if self.owns(p, k) => Some(k),
             Some((p, _)) => self.frames.get(&p).and_then(|f| f.enclosing),

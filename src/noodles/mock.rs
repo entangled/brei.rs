@@ -263,6 +263,26 @@ mod tests {
     }
     // ~/~ end
     // ~/~ begin <<docs/src/engine.md#mock-tests>>[9]
+    #[test]
+    fn local_cycle() {
+        let looping = || vec![
+            Mock::new(1, &[2], |x| Response::Value(x[0])),
+            Mock::new(2, &[3], |x| Response::Value(x[0])),
+            Mock::new(3, &[2], |x| Response::Value(x[0])).memoized(),
+            Mock::new(4, &[4], |x| Response::Value(x[0])),
+        ];
+        let is_cycle = |c: &[u64]| c == [2, 3] || c == [3, 2] || c == [4];
+        assert!(matches!(eval(promise(1, looping())), Err(Error::Cycle(c)) if is_cycle(&c)));
+
+        let continued = Mock::new(0, &[], move |_| Response::Continuation(promise(1, looping())));
+        assert!(matches!(eval_pool(promise(0, vec![continued])), Err(Error::Cycle(c)) if is_cycle(&c)));
+
+        let add = |key, a, b| binop(key, a, b, |x, y| x + y);
+        let diamond = vec![constant(1, 1), add(2, 1, 1), add(3, 1, 2), add(4, 2, 3)];
+        assert_eq!(eval(promise(4, diamond)).unwrap(), 5);
+    }
+    // ~/~ end
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[10]
     fn eval_pool(p: Box<Promise<Mock>>) -> Result<i64, Error<Mock>> {
         let worker = WorkerPool::new(4);
         let mut kernel = Kernel::new();
@@ -296,7 +316,7 @@ mod tests {
         assert!(matches!(eval_pool(promise(2, vec![binop(2, 1, 3, |a, b| a + b)])), Err(Error::Internal(InternalError::NoResult))));
     }
     // ~/~ end
-    // ~/~ begin <<docs/src/engine.md#mock-tests>>[10]
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[11]
     #[test]
     fn pool_parallel() {
         let barrier = Arc::new(std::sync::Barrier::new(4));
@@ -311,14 +331,14 @@ mod tests {
         assert_eq!(eval_pool(promise(5, tasks)).unwrap(), 10);
     }
     // ~/~ end
-    // ~/~ begin <<docs/src/engine.md#mock-tests>>[11]
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[12]
     #[test]
     #[should_panic(expected = "boom")]
     fn pool_panic() {
         let _ = eval_pool(promise(1, vec![Mock::new(1, &[], |_| panic!("boom"))]));
     }
     // ~/~ end
-    // ~/~ begin <<docs/src/engine.md#mock-tests>>[12]
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[13]
     #[test]
     fn keep_going_collects_errors() {
         let deep_error = Mock::new(2, &[], |_| Response::Continuation(promise(1, vec![
@@ -336,7 +356,7 @@ mod tests {
         assert_eq!(errors, ["deep", "shallow"]);
     }
     // ~/~ end
-    // ~/~ begin <<docs/src/engine.md#mock-tests>>[13]
+    // ~/~ begin <<docs/src/engine.md#mock-tests>>[14]
     #[test]
     fn pool_cancel() {
         let barrier = Arc::new(Barrier::new(2));

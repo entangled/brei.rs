@@ -47,6 +47,7 @@ Done so far
 - **Tests against Python Brei** (`compat.md`, `tests/python.rs`): the tests from `test_program.py`, `test_history.py`, `test_construct.py` and the file-level tests of `test_lazy.py`, and the examples from the Python documentation (except `force_run`, which needs `coverage`), run the `brei` binary. They need `python` and `git`; the Lua example is skipped without `lua`. The chapter lists the deliberate differences from Python. The `versioned_output` example makes a broken `output/latest` link; that is a mistake in the example itself, not in Brei.
 - **Housekeeping:** the unused `futures` dependency is gone, the crate is on edition 2024 (with a `let` chain in the dollar parser; the kernel has no real candidates), and `cargo clippy --all-targets` is clean.
 - **Process groups** (`brei.md`, `src/tasks/group.rs`): on Unix, each command runs in its own process group, and cancelling kills the whole group. Because commands then no longer get the terminal's Ctrl-C, the library keeps a registry of running groups, and the binary installs a handler (`ctrlc`) that calls `tasks::kill_all`.
+- **Local cycles** (`engine.md`): the kernel checks every promise it adds for tasks that wait for each other (`Promise::cycle`, a depth-first search), and reports them as `Error::Cycle`.
 
 Remaining work
 --------------
@@ -58,7 +59,6 @@ Known limitations
 
 - **Killing commands:** on Unix, commands run in their own process group, which is killed as a whole. On other platforms, only the command itself is killed, and processes it started keep running.
 - **Interrupts:** on Ctrl-C or `SIGTERM`, `brei` kills the running commands and exits with code 130, without saving the history.
-- **Local cycles:** cycles between local tasks within one promise aren't detected; the run ends with `NoResult`. Cycles through targets are detected.
 - **Standard input:** a command without `stdin` reads from `/dev/null`, not from the terminal. This differs from Python, on purpose.
 - **Empty variables:** a scalar variable with empty output is `""`, where Python gives `None`.
 - **Variables without a value:** a template that uses a variable whose value is `Value::Nothing` (see below) fails with "variable has no value".
