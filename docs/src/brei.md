@@ -284,6 +284,10 @@ impl Targets {
     pub fn len(&self) -> usize {
         self.table.read().unwrap().targets.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 ```
 

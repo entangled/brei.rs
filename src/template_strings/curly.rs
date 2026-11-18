@@ -15,7 +15,7 @@ impl<'a> Curly<'a> {
     fn flush(&mut self) -> &'a str {
         let (result, end) = self.template.split_at(self.template.len());
         self.template = end;
-        return result;
+        result
     }
 
     fn error<T>(&mut self, msg: T) -> Result<Item<'a>>
@@ -60,11 +60,11 @@ impl<'a> Iterator for Curly<'a> {
             return Some(self.error("unexpected '}'"));
         }
 
-        let idx = self.template.find(|c| c == '{' || c == '}')
+        let idx = self.template.find(['{', '}'])
             .unwrap_or(self.template.len());
         let (result, rest) = self.template.split_at(idx);
         self.template = rest;
-        return Some(Ok(Literal(result)))
+        Some(Ok(Literal(result)))
     }
 }
 

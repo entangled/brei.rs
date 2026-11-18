@@ -65,7 +65,7 @@ impl Logger {
     /// Show text in backticks in bold.
     fn highlight(&self, text: &str) -> String {
         let parts: Vec<&str> = text.split('`').collect();
-        if !self.color || parts.len() % 2 == 0 {
+        if !self.color || parts.len().is_multiple_of(2) {
             return text.to_string();
         }
         parts.iter().enumerate().map(|(i, part)| match i % 2 {

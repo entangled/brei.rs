@@ -46,7 +46,7 @@ impl<'a> Iterator for Dollar<'a> {
         }
 
         if let Some(inner) = rest.strip_prefix('{') {
-            if let Some(n) = identifier(inner).filter(|n| inner[*n..].starts_with('}')) {
+            if let Some(n) = identifier(inner) && inner[n..].starts_with('}') {
                 self.template = &inner[n + 1..];
                 return Some(Ok(Variable(&inner[..n])));
             }

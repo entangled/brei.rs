@@ -36,7 +36,7 @@ impl<'a, T: Iterator<Item=Result<Item<'a>>>> Format<'a> for T {
         for i in self {
             result.push_str(i?.format(env)?);
         }
-        return Ok(result);
+        Ok(result)
     }
 }
 // ~/~ end

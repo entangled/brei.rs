@@ -1,12 +1,11 @@
 [package]
 name = "brei"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 clap = { version = "4.6.8", features = ["derive"] }
 crossbeam-channel = "0.5.13"
-futures = "0.3.30"
 log = { version = "0.4.35", features = ["kv"] }
 md5 = "0.8.1"
 serde = { version = "1.0.206", features = ["derive"] }

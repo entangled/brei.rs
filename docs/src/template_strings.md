@@ -116,7 +116,7 @@ impl<'a, T: Iterator<Item=Result<Item<'a>>>> Format<'a> for T {
         for i in self {
             result.push_str(i?.format(env)?);
         }
-        return Ok(result);
+        Ok(result)
     }
 }
 ```
@@ -144,7 +144,7 @@ impl<'a> Curly<'a> {
     fn flush(&mut self) -> &'a str {
         let (result, end) = self.template.split_at(self.template.len());
         self.template = end;
-        return result;
+        result
     }
 
     fn error<T>(&mut self, msg: T) -> Result<Item<'a>>
@@ -189,11 +189,11 @@ impl<'a> Iterator for Curly<'a> {
             return Some(self.error("unexpected '}'"));
         }
 
-        let idx = self.template.find(|c| c == '{' || c == '}')
+        let idx = self.template.find(['{', '}'])
             .unwrap_or(self.template.len());
         let (result, rest) = self.template.split_at(idx);
         self.template = rest;
-        return Some(Ok(Literal(result)))
+        Some(Ok(Literal(result)))
     }
 }
 
@@ -302,7 +302,7 @@ impl<'a> Iterator for Dollar<'a> {
         }
 
         if let Some(inner) = rest.strip_prefix('{') {
-            if let Some(n) = identifier(inner).filter(|n| inner[*n..].starts_with('}')) {
+            if let Some(n) = identifier(inner) && inner[n..].starts_with('}') {
                 self.template = &inner[n + 1..];
                 return Some(Ok(Variable(&inner[..n])));
             }

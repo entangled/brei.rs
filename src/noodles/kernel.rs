@@ -39,6 +39,12 @@ pub struct Kernel<T: Task> {
     errors: Vec<T::Error>,
 }
 
+impl<T: Task> Default for Kernel<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: Task> Kernel<T> {
     pub fn new() -> Self {
         Self {

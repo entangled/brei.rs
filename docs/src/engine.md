@@ -208,6 +208,12 @@ pub struct Kernel<T: Task> {
     errors: Vec<T::Error>,
 }
 
+impl<T: Task> Default for Kernel<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: Task> Kernel<T> {
     pub fn new() -> Self {
         Self {
@@ -479,7 +485,13 @@ pub struct SingleWorker<T: Task> {
 impl<T: Task> SingleWorker<T> {
     pub fn new() -> Self {
         let (sender, receiver) = unbounded();
-        return SingleWorker{ sender, receiver, token: CancelToken::new() }
+        SingleWorker{ sender, receiver, token: CancelToken::new() }
+    }
+}
+
+impl<T: Task> Default for SingleWorker<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
