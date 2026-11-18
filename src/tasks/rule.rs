@@ -24,6 +24,7 @@ pub enum Failure {
     Command { command: String, code: Option<i32> },
     NotAchieved(Vec<Target>),
     Cancelled,
+    Rule(String, Box<Failure>),
 }
 
 impl From<std::io::Error> for Failure {
@@ -47,6 +48,7 @@ impl fmt::Display for Failure {
                 write!(f, "rule didn't create {}", targets.join(", "))
             }
             Failure::Cancelled => write!(f, "cancelled"),
+            Failure::Rule(note, failure) => write!(f, "{note}: {failure}"),
         }
     }
 }
@@ -121,6 +123,18 @@ impl Rule {
 
     pub fn digest(&self) -> Option<String> {
         self.script.as_ref().map(|s| format!("{:x}", md5::compute(s)))
+    }
+
+    /// A short note on the rule, for the log: its description, its name, or its targets.
+    pub fn note(&self) -> String {
+        if let Some(description) = &self.description {
+            return description.clone();
+        }
+        if let Some(name) = &self.name {
+            return format!("#{name}");
+        }
+        let targets: Vec<String> = self.creates.iter().map(|t| format!("`{t}`")).collect();
+        format!("creating {}", targets.join(" "))
     }
 
     pub fn always_run(&self) -> bool {

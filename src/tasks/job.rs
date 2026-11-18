@@ -61,6 +61,10 @@ fn expand(db: Arc<TaskDb>, recipe: Arc<Recipe>, args: HashMap<TargetId, Value>) 
         }
     }
 
+    let label = match &recipe.kind {
+        Kind::Template(template) => template.label(),
+        _ => format!("`{}`", db.targets.get(recipe.creates[0])),
+    };
     let result = match &recipe.kind {
         Kind::Variable(template) => substitute(template, &env).map(|s| Response::Value(Value::Scalar(s))),
         Kind::Template(template) => template.expand(&env, &lists)
@@ -71,7 +75,7 @@ fn expand(db: Arc<TaskDb>, recipe: Arc<Recipe>, args: HashMap<TargetId, Value>) 
             }),
         Kind::Rule(_) => unreachable!("rules are not expanded"),
     };
-    result.unwrap_or_else(Response::Error)
+    result.unwrap_or_else(|failure| Response::Error(Failure::Rule(label, Box::new(failure))))
 }
 
 fn run_rule(db: Arc<TaskDb>, entry: Arc<Entry>, args: HashMap<TargetId, Value>, cancel: &CancelToken) -> Response<Job> {
@@ -81,7 +85,8 @@ fn run_rule(db: Arc<TaskDb>, entry: Arc<Entry>, args: HashMap<TargetId, Value>, 
     });
     match db.execute(&entry.rule, input, cancel) {
         Ok(value) => Response::Value(value),
-        Err(failure) => Response::Error(failure),
+        Err(Failure::Cancelled) => Response::Error(Failure::Cancelled),
+        Err(failure) => Response::Error(Failure::Rule(entry.rule.note(), Box::new(failure))),
     }
 }
 

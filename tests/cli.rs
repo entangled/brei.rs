@@ -71,6 +71,30 @@ fn failure() {
 // ~/~ end
 // ~/~ begin <<docs/src/main_module.md#cli-tests>>[2]
 #[test]
+fn logging() {
+    let dir = setup(r#"
+        [[task]]
+        name = "greet"
+        script = "echo hello"
+
+        [[task]]
+        name = "complain"
+        description = "complaining"
+        runner = "bash"
+        script = "echo oops >&2"
+    "#);
+    let output = brei(dir.path(), &["greet", "--debug"]);
+    let log = stderr(&output);
+    assert!(log.starts_with("#greet\n") && log.contains("#greet hello\n"), "{log}");
+    assert!(log.contains("debug: #greet: running `echo hello`"), "{log}");
+    assert!(output.stdout.is_empty());
+
+    let output = brei(dir.path(), &["complain"]);
+    assert!(stderr(&output).contains("complaining oops"), "{}", stderr(&output));
+}
+// ~/~ end
+// ~/~ begin <<docs/src/main_module.md#cli-tests>>[3]
+#[test]
 fn input_file() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("workflow.toml"), format!("[brei]\n{}", HELLO.replace("[[task]]", "[[brei.task]]"))).unwrap();

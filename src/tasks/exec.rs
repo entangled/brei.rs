@@ -1,6 +1,6 @@
 // ~/~ begin <<docs/src/brei.md#brei::src/tasks/exec.rs>>[init]
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -85,11 +85,14 @@ impl TaskDb {
     // ~/~ begin <<docs/src/brei.md#brei::exec-execute>>[init]
     pub(super) fn execute(&self, rule: &Rule, input: Option<&str>, cancel: &CancelToken) -> Result<Value, Failure> {
         if !(self.force_run || rule.always_run()) && !self.needs_run(rule)? {
+            log::debug!("{} is up to date", rule.note());
             return Ok(Value::Nothing);
         }
         if rule.runner.is_none() && rule.script.is_none() {
             return Ok(Value::Nothing);
         }
+        let note = rule.note();
+        log::info!(target: "brei::rule", "{note}");
 
         let mut script_file = None;
         let commands = self.commands(rule, &mut script_file)?;
@@ -106,7 +109,7 @@ impl TaskDb {
         let mut output = Vec::new();
         for command in &commands {
             let mut cmd = Command::new(&command[0]);
-            cmd.args(&command[1..]).current_dir(&self.root).stderr(Stdio::inherit());
+            cmd.args(&command[1..]).current_dir(&self.root).stderr(Stdio::piped());
             cmd.stdin(match &stdin {
                 Some(file) => Stdio::from(file.try_clone()?),
                 None if input.is_some() => Stdio::piped(),
@@ -114,10 +117,11 @@ impl TaskDb {
             });
             cmd.stdout(match &stdout {
                 Some(file) => Stdio::from(file.try_clone()?),
-                None if capture => Stdio::piped(),
-                None => Stdio::inherit(),
+                None => Stdio::piped(),
             });
-            match run_command(cmd, &command.join(" "), input, cancel) {
+            let display = command.join(" ");
+            log::debug!("{note}: running `{display}`");
+            match run_command(cmd, &display, input, capture, &note, cancel) {
                 Ok(out) => output.extend(out),
                 Err(failure) => {
                     self.forget(rule);
@@ -144,7 +148,20 @@ impl TaskDb {
 }
 
 // ~/~ begin <<docs/src/brei.md#brei::exec-run-command>>[init]
-fn run_command(mut cmd: Command, display: &str, input: Option<&str>, cancel: &CancelToken) -> Result<Vec<u8>, Failure> {
+fn forward(stream: impl Read + Send + 'static, note: &str) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    let note = note.to_string();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        while reader.read_until(b'\n', &mut line)? > 0 {
+            log::info!(target: "brei::output", note = note.as_str(); "{}", String::from_utf8_lossy(&line).trim_end());
+            line.clear();
+        }
+        Ok(Vec::new())
+    })
+}
+
+fn run_command(mut cmd: Command, display: &str, input: Option<&str>, capture: bool, note: &str, cancel: &CancelToken) -> Result<Vec<u8>, Failure> {
     let mut child = cmd.spawn().map_err(|e| Failure::Io(format!("can't run `{display}`: {e}")))?;
 
     let writer = match (child.stdin.take(), input) {
@@ -155,10 +172,14 @@ fn run_command(mut cmd: Command, display: &str, input: Option<&str>, cancel: &Ca
         }
         _ => None,
     };
-    let reader = child.stdout.take().map(|mut stdout| thread::spawn(move || {
-        let mut buffer = Vec::new();
-        stdout.read_to_end(&mut buffer).map(|_| buffer)
-    }));
+    let reader = child.stdout.take().map(|mut stdout| match capture {
+        true => thread::spawn(move || {
+            let mut buffer = Vec::new();
+            stdout.read_to_end(&mut buffer).map(|_| buffer)
+        }),
+        false => forward(stdout, note),
+    });
+    let errors = child.stderr.take().map(|stderr| forward(stderr, note));
 
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -174,6 +195,9 @@ fn run_command(mut cmd: Command, display: &str, input: Option<&str>, cancel: &Ca
 
     if let Some(writer) = writer {
         let _ = writer.join();
+    }
+    if let Some(errors) = errors {
+        errors.join().expect("reader thread panicked")?;
     }
     let output = match reader {
         Some(reader) => reader.join().expect("reader thread panicked")?,

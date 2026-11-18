@@ -34,6 +34,10 @@ fn read(dir: &TempDir, path: &str) -> String {
     fs::read_to_string(dir.path().join(path)).unwrap()
 }
 
+fn in_rule(note: &str, failure: Failure) -> Failure {
+    Failure::Rule(note.into(), Box::new(failure))
+}
+
 fn failures(result: Result<Value, Error<Job>>) -> Vec<Failure> {
     match result {
         Err(Error::Jobs(failures)) => failures,
@@ -138,9 +142,11 @@ fn failing_rules() {
     db.add(rule(&["z.txt"], &[], "no-such-command")).unwrap();
     let db = Arc::new(db);
 
-    assert_eq!(failures(run(&db, "x.txt")), [Failure::Command { command: "false".into(), code: Some(1) }]);
-    assert_eq!(failures(run(&db, "y.txt")), [Failure::NotAchieved(targets(&["y.txt"]))]);
-    assert!(matches!(&failures(run(&db, "z.txt"))[..], [Failure::Io(msg)] if msg.contains("no-such-command")));
+    assert_eq!(failures(run(&db, "x.txt")), [in_rule("creating `x.txt`", Failure::Command { command: "false".into(), code: Some(1) })]);
+    assert_eq!(failures(run(&db, "y.txt")), [in_rule("creating `y.txt`", Failure::NotAchieved(targets(&["y.txt"])))]);
+    let z = failures(run(&db, "z.txt"));
+    assert!(matches!(&z[..], [Failure::Rule(_, f)] if matches!(&**f, Failure::Io(msg) if msg.contains("no-such-command"))));
+    assert_eq!(z[0].to_string(), "creating `z.txt`: can't run `no-such-command`: No such file or directory (os error 2)");
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[5]
@@ -238,7 +244,7 @@ fn build_several() {
     fs::remove_file(dir.path().join("b.txt")).unwrap();
     fs::remove_file(dir.path().join("c.txt")).unwrap();
     let result = build_all(&db, &mut Kernel::new().keep_going(), &SingleWorker::new(), &ids(&["x.txt", "b.txt", "c.txt"]));
-    assert_eq!(failures(result.map(|_| Value::Nothing)), [Failure::Command { command: "false".into(), code: Some(1) }]);
+    assert_eq!(failures(result.map(|_| Value::Nothing)), [in_rule("creating `x.txt`", Failure::Command { command: "false".into(), code: Some(1) })]);
     assert!(dir.path().join("b.txt").exists() && dir.path().join("c.txt").exists());
 }
 // ~/~ end

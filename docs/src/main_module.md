@@ -18,6 +18,7 @@ The binary is the `brei` command-line program. It follows the options of the Pyt
 
 ```rust
 //| file: src/main.rs
+use std::io::IsTerminal;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::ExitCode;
@@ -66,9 +67,79 @@ struct Args {
     debug: bool,
 }
 
+<<main-logger>>
 <<main-targets>>
 <<main-errors>>
 <<main-run>>
+```
+
+### Logging
+
+The library logs through the `log` crate, and this is where the log is shown, on standard error. When a rule runs, its note is shown in green. Every line of output of a command is shown with the note of its rule in yellow (the library passes it as the key-value pair `note`). Anything between backticks is shown in bold. Without `--debug`, debug messages are hidden. Colours are only used on a terminal, and not when `NO_COLOR` is set.
+
+```rust
+//| id: main-logger
+struct Logger {
+    level: log::LevelFilter,
+    color: bool,
+}
+
+impl Logger {
+    fn paint(&self, code: &str, text: &str) -> String {
+        match self.color {
+            true => format!("\x1b[{code}m{text}\x1b[0m"),
+            false => text.to_string(),
+        }
+    }
+
+    /// Show text in backticks in bold.
+    fn highlight(&self, text: &str) -> String {
+        let parts: Vec<&str> = text.split('`').collect();
+        if !self.color || parts.len() % 2 == 0 {
+            return text.to_string();
+        }
+        parts.iter().enumerate().map(|(i, part)| match i % 2 {
+            1 => format!("\x1b[1m`{part}`\x1b[22m"),
+            _ => part.to_string(),
+        }).collect()
+    }
+}
+
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= self.level && metadata.target().starts_with("brei")
+    }
+
+    fn log(&self, record: &log::Record) {
+        use log::Level;
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let message = record.args().to_string();
+        let line = match (record.level(), record.target()) {
+            (Level::Info, "brei::rule") => self.paint("32", &message),
+            (Level::Info, "brei::output") => {
+                let note = record.key_values().get(log::kv::Key::from_str("note")).map(|v| v.to_string()).unwrap_or_default();
+                format!("{} {message}", self.paint("33", &note))
+            }
+            (Level::Info, _) => self.highlight(&message),
+            (Level::Debug | Level::Trace, _) => self.paint("2", &format!("debug: {message}")),
+            (Level::Warn, _) => format!("{} {}", self.paint("33", "warning:"), self.highlight(&message)),
+            (Level::Error, _) => format!("{} {}", self.paint("1;31", "error:"), self.highlight(&message)),
+        };
+        eprintln!("{line}");
+    }
+
+    fn flush(&self) {}
+}
+
+fn init_logger(debug: bool) {
+    let level = if debug { log::LevelFilter::Debug } else { log::LevelFilter::Info };
+    let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    if log::set_logger(Box::leak(Box::new(Logger { level, color }))).is_ok() {
+        log::set_max_level(level);
+    }
+}
 ```
 
 ### Targets
@@ -160,17 +231,16 @@ fn main() -> ExitCode {
         list_runners();
         return ExitCode::SUCCESS;
     }
+    init_logger(args.debug);
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
-            eprintln!("brei: {msg}");
+            log::error!("{msg}");
             ExitCode::FAILURE
         }
     }
 }
 ```
-
-`--debug` doesn't do anything yet; it will once there is [logging](./todo.md).
 
 Tests
 -----
@@ -257,6 +327,34 @@ fn failure() {
     let output = brei(dir.path(), &["nothere"]);
     assert!(!output.status.success());
     assert!(stderr(&output).contains("missing dependency: `nothere`"), "{}", stderr(&output));
+}
+```
+
+The output of commands is logged, with the note of the rule. With `--debug`, we also see which commands run.
+
+```rust
+//| id: cli-tests
+#[test]
+fn logging() {
+    let dir = setup(r#"
+        [[task]]
+        name = "greet"
+        script = "echo hello"
+
+        [[task]]
+        name = "complain"
+        description = "complaining"
+        runner = "bash"
+        script = "echo oops >&2"
+    "#);
+    let output = brei(dir.path(), &["greet", "--debug"]);
+    let log = stderr(&output);
+    assert!(log.starts_with("#greet\n") && log.contains("#greet hello\n"), "{log}");
+    assert!(log.contains("debug: #greet: running `echo hello`"), "{log}");
+    assert!(output.stdout.is_empty());
+
+    let output = brei(dir.path(), &["complain"]);
+    assert!(stderr(&output).contains("complaining oops"), "{}", stderr(&output));
 }
 ```
 

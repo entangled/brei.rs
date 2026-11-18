@@ -413,7 +413,7 @@ pub enum Value {
 
 ### Failures
 
-When a rule fails, the engine collects the error. These need to be `Clone`, so we store messages instead of the original errors.
+When a rule fails, the engine collects the error. These need to be `Clone`, so we store messages instead of the original errors. A failure in running a rule is wrapped in `Failure::Rule`, with the note that identifies the rule in the log.
 
 ```rust
 //| id: rule-failure
@@ -427,6 +427,7 @@ pub enum Failure {
     Command { command: String, code: Option<i32> },
     NotAchieved(Vec<Target>),
     Cancelled,
+    Rule(String, Box<Failure>),
 }
 
 impl From<std::io::Error> for Failure {
@@ -450,6 +451,7 @@ impl fmt::Display for Failure {
                 write!(f, "rule didn't create {}", targets.join(", "))
             }
             Failure::Cancelled => write!(f, "cancelled"),
+            Failure::Rule(note, failure) => write!(f, "{note}: {failure}"),
         }
     }
 }
@@ -536,6 +538,18 @@ impl Rule {
 
     pub fn digest(&self) -> Option<String> {
         self.script.as_ref().map(|s| format!("{:x}", md5::compute(s)))
+    }
+
+    /// A short note on the rule, for the log: its description, its name, or its targets.
+    pub fn note(&self) -> String {
+        if let Some(description) = &self.description {
+            return description.clone();
+        }
+        if let Some(name) = &self.name {
+            return format!("#{name}");
+        }
+        let targets: Vec<String> = self.creates.iter().map(|t| format!("`{t}`")).collect();
+        format!("creating {}", targets.join(" "))
     }
 
     pub fn always_run(&self) -> bool {
@@ -989,7 +1003,7 @@ A rule needs to run when one of its target files is missing, is older than one o
 ```rust
 //| file: src/tasks/exec.rs
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -1088,7 +1102,9 @@ fn commands(&self, rule: &Rule, script_file: &mut Option<TempPath>) -> Result<Ve
 
 To execute a rule, we first check if it needs to run at all. A rule without a script (only dependencies) is done once its dependencies are.
 
-Standard input comes from a file, from the value of a variable, or is empty. Unlike the Python version, a command never reads from the terminal: with many commands running at the same time that would be confusing. Standard output goes to a file, is captured into a variable, or goes to the terminal. Standard error always goes to the terminal. If there are several commands, they share the same input and output files.
+Standard input comes from a file, from the value of a variable, or is empty. Unlike the Python version, a command never reads from the terminal: with many commands running at the same time that would be confusing. Standard output goes to a file, is captured into a variable, or goes to the log. Standard error always goes to the log. If there are several commands, they share the same input and output files.
+
+The log uses the `log` crate. Every rule that runs logs its note, and every line of output is logged with the note attached as the key-value pair `note`, so that output from rules that run at the same time can be told apart. The program that uses the library decides how to show this.
 
 After running, we store the digest in the history, and check that the rule actually did what it promised: if it still needs to run, something is wrong. The value of a rule is its standard output, if it was captured: trimmed for a scalar, and split into non-empty lines for a list.
 
@@ -1096,11 +1112,14 @@ After running, we store the digest in the history, and check that the rule actua
 //| id: exec-execute
 pub(super) fn execute(&self, rule: &Rule, input: Option<&str>, cancel: &CancelToken) -> Result<Value, Failure> {
     if !(self.force_run || rule.always_run()) && !self.needs_run(rule)? {
+        log::debug!("{} is up to date", rule.note());
         return Ok(Value::Nothing);
     }
     if rule.runner.is_none() && rule.script.is_none() {
         return Ok(Value::Nothing);
     }
+    let note = rule.note();
+    log::info!(target: "brei::rule", "{note}");
 
     let mut script_file = None;
     let commands = self.commands(rule, &mut script_file)?;
@@ -1117,7 +1136,7 @@ pub(super) fn execute(&self, rule: &Rule, input: Option<&str>, cancel: &CancelTo
     let mut output = Vec::new();
     for command in &commands {
         let mut cmd = Command::new(&command[0]);
-        cmd.args(&command[1..]).current_dir(&self.root).stderr(Stdio::inherit());
+        cmd.args(&command[1..]).current_dir(&self.root).stderr(Stdio::piped());
         cmd.stdin(match &stdin {
             Some(file) => Stdio::from(file.try_clone()?),
             None if input.is_some() => Stdio::piped(),
@@ -1125,10 +1144,11 @@ pub(super) fn execute(&self, rule: &Rule, input: Option<&str>, cancel: &CancelTo
         });
         cmd.stdout(match &stdout {
             Some(file) => Stdio::from(file.try_clone()?),
-            None if capture => Stdio::piped(),
-            None => Stdio::inherit(),
+            None => Stdio::piped(),
         });
-        match run_command(cmd, &command.join(" "), input, cancel) {
+        let display = command.join(" ");
+        log::debug!("{note}: running `{display}`");
+        match run_command(cmd, &display, input, capture, &note, cancel) {
             Ok(out) => output.extend(out),
             Err(failure) => {
                 self.forget(rule);
@@ -1155,13 +1175,26 @@ pub(super) fn execute(&self, rule: &Rule, input: Option<&str>, cancel: &CancelTo
 
 ### Running a command
 
-Input and captured output go through pipes. Each pipe gets its own thread, so that a command that writes a lot of output before reading its input can't block. Meanwhile, we poll the command to see if it has finished, and check the cancel token. A cancelled command is killed.
+Input and output go through pipes. Each pipe gets its own thread, so that a command that writes a lot of output before reading its input can't block. Output is either captured, or forwarded to the log line by line. Meanwhile, we poll the command to see if it has finished, and check the cancel token. A cancelled command is killed.
 
 Killing only stops the command itself. If the command started processes of its own, like a runner script that calls other programs, those keep running. Fixing that needs process groups, which is platform specific.
 
 ```rust
 //| id: exec-run-command
-fn run_command(mut cmd: Command, display: &str, input: Option<&str>, cancel: &CancelToken) -> Result<Vec<u8>, Failure> {
+fn forward(stream: impl Read + Send + 'static, note: &str) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    let note = note.to_string();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        while reader.read_until(b'\n', &mut line)? > 0 {
+            log::info!(target: "brei::output", note = note.as_str(); "{}", String::from_utf8_lossy(&line).trim_end());
+            line.clear();
+        }
+        Ok(Vec::new())
+    })
+}
+
+fn run_command(mut cmd: Command, display: &str, input: Option<&str>, capture: bool, note: &str, cancel: &CancelToken) -> Result<Vec<u8>, Failure> {
     let mut child = cmd.spawn().map_err(|e| Failure::Io(format!("can't run `{display}`: {e}")))?;
 
     let writer = match (child.stdin.take(), input) {
@@ -1172,10 +1205,14 @@ fn run_command(mut cmd: Command, display: &str, input: Option<&str>, cancel: &Ca
         }
         _ => None,
     };
-    let reader = child.stdout.take().map(|mut stdout| thread::spawn(move || {
-        let mut buffer = Vec::new();
-        stdout.read_to_end(&mut buffer).map(|_| buffer)
-    }));
+    let reader = child.stdout.take().map(|mut stdout| match capture {
+        true => thread::spawn(move || {
+            let mut buffer = Vec::new();
+            stdout.read_to_end(&mut buffer).map(|_| buffer)
+        }),
+        false => forward(stdout, note),
+    });
+    let errors = child.stderr.take().map(|stderr| forward(stderr, note));
 
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -1191,6 +1228,9 @@ fn run_command(mut cmd: Command, display: &str, input: Option<&str>, cancel: &Ca
 
     if let Some(writer) = writer {
         let _ = writer.join();
+    }
+    if let Some(errors) = errors {
+        errors.join().expect("reader thread panicked")?;
     }
     let output = match reader {
         Some(reader) => reader.join().expect("reader thread panicked")?,
@@ -1284,6 +1324,10 @@ fn expand(db: Arc<TaskDb>, recipe: Arc<Recipe>, args: HashMap<TargetId, Value>) 
         }
     }
 
+    let label = match &recipe.kind {
+        Kind::Template(template) => template.label(),
+        _ => format!("`{}`", db.targets.get(recipe.creates[0])),
+    };
     let result = match &recipe.kind {
         Kind::Variable(template) => substitute(template, &env).map(|s| Response::Value(Value::Scalar(s))),
         Kind::Template(template) => template.expand(&env, &lists)
@@ -1294,7 +1338,7 @@ fn expand(db: Arc<TaskDb>, recipe: Arc<Recipe>, args: HashMap<TargetId, Value>) 
             }),
         Kind::Rule(_) => unreachable!("rules are not expanded"),
     };
-    result.unwrap_or_else(Response::Error)
+    result.unwrap_or_else(|failure| Response::Error(Failure::Rule(label, Box::new(failure))))
 }
 
 fn run_rule(db: Arc<TaskDb>, entry: Arc<Entry>, args: HashMap<TargetId, Value>, cancel: &CancelToken) -> Response<Job> {
@@ -1304,7 +1348,8 @@ fn run_rule(db: Arc<TaskDb>, entry: Arc<Entry>, args: HashMap<TargetId, Value>, 
     });
     match db.execute(&entry.rule, input, cancel) {
         Ok(value) => Response::Value(value),
-        Err(failure) => Response::Error(failure),
+        Err(Failure::Cancelled) => Response::Error(Failure::Cancelled),
+        Err(failure) => Response::Error(Failure::Rule(entry.rule.note(), Box::new(failure))),
     }
 }
 
@@ -1423,6 +1468,10 @@ fn read(dir: &TempDir, path: &str) -> String {
     fs::read_to_string(dir.path().join(path)).unwrap()
 }
 
+fn in_rule(note: &str, failure: Failure) -> Failure {
+    Failure::Rule(note.into(), Box::new(failure))
+}
+
 fn failures(result: Result<Value, Error<Job>>) -> Vec<Failure> {
     match result {
         Err(Error::Jobs(failures)) => failures,
@@ -1536,7 +1585,7 @@ fn missing_dependency() {
 }
 ```
 
-A failing command fails the rule, and so does a rule that doesn't create its targets.
+A failing command fails the rule, and so does a rule that doesn't create its targets. Failures say which rule they come from.
 
 ```rust
 //| id: task-tests
@@ -1549,9 +1598,11 @@ fn failing_rules() {
     db.add(rule(&["z.txt"], &[], "no-such-command")).unwrap();
     let db = Arc::new(db);
 
-    assert_eq!(failures(run(&db, "x.txt")), [Failure::Command { command: "false".into(), code: Some(1) }]);
-    assert_eq!(failures(run(&db, "y.txt")), [Failure::NotAchieved(targets(&["y.txt"]))]);
-    assert!(matches!(&failures(run(&db, "z.txt"))[..], [Failure::Io(msg)] if msg.contains("no-such-command")));
+    assert_eq!(failures(run(&db, "x.txt")), [in_rule("creating `x.txt`", Failure::Command { command: "false".into(), code: Some(1) })]);
+    assert_eq!(failures(run(&db, "y.txt")), [in_rule("creating `y.txt`", Failure::NotAchieved(targets(&["y.txt"])))]);
+    let z = failures(run(&db, "z.txt"));
+    assert!(matches!(&z[..], [Failure::Rule(_, f)] if matches!(&**f, Failure::Io(msg) if msg.contains("no-such-command"))));
+    assert_eq!(z[0].to_string(), "creating `z.txt`: can't run `no-such-command`: No such file or directory (os error 2)");
 }
 ```
 
@@ -1666,7 +1717,7 @@ fn build_several() {
     fs::remove_file(dir.path().join("b.txt")).unwrap();
     fs::remove_file(dir.path().join("c.txt")).unwrap();
     let result = build_all(&db, &mut Kernel::new().keep_going(), &SingleWorker::new(), &ids(&["x.txt", "b.txt", "c.txt"]));
-    assert_eq!(failures(result.map(|_| Value::Nothing)), [Failure::Command { command: "false".into(), code: Some(1) }]);
+    assert_eq!(failures(result.map(|_| Value::Nothing)), [in_rule("creating `x.txt`", Failure::Command { command: "false".into(), code: Some(1) })]);
     assert!(dir.path().join("b.txt").exists() && dir.path().join("c.txt").exists());
 }
 ```

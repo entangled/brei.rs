@@ -219,7 +219,9 @@ impl<'a, W: Worker<Job>> Resolver<'a, W> {
         let names: BTreeSet<String> = ready.iter().flat_map(|r| r.target_variables()).map(String::from).collect();
         let env: Env = self.env(names.iter().map(String::as_str))?.into_iter().map(|(k, v)| (k, escape(&v))).collect();
         for rule in ready {
-            self.add_rule(rule.fill_targets(&env))?;
+            let rule = rule.fill_targets(&env);
+            log::debug!("resolved the targets of {}", rule.label());
+            self.add_rule(rule)?;
         }
         Ok(waiting)
     }
@@ -263,6 +265,7 @@ impl<'a, W: Worker<Job>> Resolver<'a, W> {
         if self.db.creates(&target) {
             self.values(&[target])?;
         }
+        log::debug!("including `{}`", path.display());
         let full = self.db.root.join(&path);
         if !full.exists() {
             return Err(ProgramError::MissingInclude(path));
@@ -286,7 +289,10 @@ impl<'a, W: Worker<Job>> Resolver<'a, W> {
         for call in program.call {
             match self.templates.get(&call.template) {
                 Some(template) if call.splices().is_empty() => rules.extend(call.expand(template)?),
-                _ => delayed_calls.push(call),
+                _ => {
+                    log::debug!("call to `{}` waits for includes or list variables", call.template);
+                    delayed_calls.push(call);
+                }
             }
         }
         let mut delayed = Vec::new();
@@ -506,7 +512,7 @@ mod tests {
             ..Default::default()
         };
         let err = Setup::new().resolve(failing, &no_includes).unwrap_err();
-        assert_eq!(err.to_string(), "`false` failed with exit code 1");
+        assert_eq!(err.to_string(), "creating `var(x)`: `false` failed with exit code 1");
     }
     // ~/~ end
 }

@@ -1,4 +1,5 @@
 // ~/~ begin <<docs/src/main_module.md#src/main.rs>>[init]
+use std::io::IsTerminal;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::ExitCode;
@@ -47,6 +48,69 @@ struct Args {
     debug: bool,
 }
 
+// ~/~ begin <<docs/src/main_module.md#main-logger>>[init]
+struct Logger {
+    level: log::LevelFilter,
+    color: bool,
+}
+
+impl Logger {
+    fn paint(&self, code: &str, text: &str) -> String {
+        match self.color {
+            true => format!("\x1b[{code}m{text}\x1b[0m"),
+            false => text.to_string(),
+        }
+    }
+
+    /// Show text in backticks in bold.
+    fn highlight(&self, text: &str) -> String {
+        let parts: Vec<&str> = text.split('`').collect();
+        if !self.color || parts.len() % 2 == 0 {
+            return text.to_string();
+        }
+        parts.iter().enumerate().map(|(i, part)| match i % 2 {
+            1 => format!("\x1b[1m`{part}`\x1b[22m"),
+            _ => part.to_string(),
+        }).collect()
+    }
+}
+
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= self.level && metadata.target().starts_with("brei")
+    }
+
+    fn log(&self, record: &log::Record) {
+        use log::Level;
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let message = record.args().to_string();
+        let line = match (record.level(), record.target()) {
+            (Level::Info, "brei::rule") => self.paint("32", &message),
+            (Level::Info, "brei::output") => {
+                let note = record.key_values().get(log::kv::Key::from_str("note")).map(|v| v.to_string()).unwrap_or_default();
+                format!("{} {message}", self.paint("33", &note))
+            }
+            (Level::Info, _) => self.highlight(&message),
+            (Level::Debug | Level::Trace, _) => self.paint("2", &format!("debug: {message}")),
+            (Level::Warn, _) => format!("{} {}", self.paint("33", "warning:"), self.highlight(&message)),
+            (Level::Error, _) => format!("{} {}", self.paint("1;31", "error:"), self.highlight(&message)),
+        };
+        eprintln!("{line}");
+    }
+
+    fn flush(&self) {}
+}
+
+fn init_logger(debug: bool) {
+    let level = if debug { log::LevelFilter::Debug } else { log::LevelFilter::Info };
+    let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    if log::set_logger(Box::leak(Box::new(Logger { level, color }))).is_ok() {
+        log::set_max_level(level);
+    }
+}
+// ~/~ end
 // ~/~ begin <<docs/src/main_module.md#main-targets>>[init]
 fn target(db: &TaskDb, name: &str) -> Result<TargetId, String> {
     let phony = Target::Phony(name.to_string());
@@ -119,10 +183,11 @@ fn main() -> ExitCode {
         list_runners();
         return ExitCode::SUCCESS;
     }
+    init_logger(args.debug);
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
-            eprintln!("brei: {msg}");
+            log::error!("{msg}");
             ExitCode::FAILURE
         }
     }
