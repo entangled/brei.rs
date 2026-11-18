@@ -1,7 +1,7 @@
 To do
 =====
 
-The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding the program loader.
+The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding the CLI.
 
 Done so far
 -----------
@@ -38,27 +38,16 @@ Done so far
   - `fill` substitutes some variables and leaves the others, keeping `$$` escapes intact. Python unescapes `$$` once per substitution, so a `$$` in a called template ends up as a variable there.
   - Included programs are read by a function `&dyn Fn(&Path) -> Result<Program, String>` that the caller passes in.
 - **Loading programs** (`program_loader.md`, `src/loader.rs`): `Program`, `Call`, `Argument`, `Join`, `RuleTemplate` and `Runner` derive `Deserialize` and refuse unknown fields. `loader::read_program(dir, input)` reads `file[section]` (TOML or JSON), or finds `brei.toml` or `[tool.brei]` in `pyproject.toml`. `loader::load_include` is the include loader for `tasks::resolve`. Rule errors during resolution name the rule (`RuleTemplate::label`). `data.rs` is gone. All examples in `../brei/examples` deserialize.
+- **CLI** (`main_module.md`, `src/main.rs`, `tests/cli.rs`): `clap`, with targets, `-i`, `-B`, `-j` (default: number of CPUs), `-k` (keep going), `-v`, `--list-runners` and `--debug` (accepted, but does nothing until item 7). A target name is `#name` if a rule has that name, and otherwise a file or `var(...)`. History is loaded before resolution and saved after the build, also on failure. Errors go to stderr with exit code 1. The examples `rot13`, `include-gen`, `list_variables`, `template_multiplexing` and `hello-includes` run.
 
 Remaining work
 --------------
 
-In the suggested order. Items 1 to 5 are done.
-
-### 6. CLI
-
-`src/main.rs` is still "Hello, world". Options, following `cli.py`:
-
-- target names;
-- `-i` input file;
-- `-B` force (`TaskDb.force_run`);
-- `-j` jobs (the size of the `WorkerPool`);
-- `--list-runners`, `--version` and `--debug`.
-
-Probably use `clap`. Run with `WorkerPool` and `tasks::build_all`. Load the history before resolving the program (resolution may run rules) and save it after the build, also when either fails. Resolve and build with the same kernel.
+In the suggested order. Items 1 to 6 are done.
 
 ### 7. Logging
 
-Python logs a short note per rule (its description, name or targets), and forwards each command's stdout and stderr line by line, prefixed with that note. Here, output now goes straight to the terminal (`Stdio::inherit`).
+Python logs a short note per rule (its description, name or targets), and forwards each command's stdout and stderr line by line, prefixed with that note. Here, output now goes straight to the terminal (`Stdio::inherit`). Hook up `--debug`. Failures don't say which rule they come from yet (`Failure::Command` only names the command).
 
 ### 8. Tests against Python Brei
 
