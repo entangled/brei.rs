@@ -1,12 +1,14 @@
 // ~/~ begin <<docs/src/brei.md#brei::src/tasks/template.rs>>[init]
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use serde::Deserialize;
 use crate::template_strings::{dollar, Env, Error, Format, Item};
 use super::db::{Kind, Recipe, TaskDb};
 use super::rule::{Failure, Rule, RuleError};
 use super::target::{wrapped, Target, VarType};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RuleTemplate {
     pub creates: Vec<String>,
     pub requires: Vec<String>,
@@ -76,6 +78,21 @@ impl RuleTemplate {
     /// Names of the variables used in the template.
     pub fn variables(&self) -> BTreeSet<&str> {
         self.strings().flat_map(|s| variables(s)).collect()
+    }
+
+    /// A short description of the rule, for error messages.
+    pub fn label(&self) -> String {
+        let targets = self.targets();
+        if let Some(name) = &self.name {
+            format!("rule `#{name}`")
+        } else if !targets.is_empty() {
+            let targets: Vec<String> = targets.iter().map(|t| format!("`{t}`")).collect();
+            format!("rule for {}", targets.join(", "))
+        } else if let Some(description) = &self.description {
+            format!("rule \"{description}\"")
+        } else {
+            "rule without targets".to_string()
+        }
     }
 
     /// Names of the variables used in the targets.

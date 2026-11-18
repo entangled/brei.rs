@@ -2,6 +2,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
+use serde::Deserialize;
 use super::target::{Target, VarType, TypeMismatch};
 
 // ~/~ begin <<docs/src/brei.md#brei::rule-value>>[init]
@@ -51,7 +52,8 @@ impl fmt::Display for Failure {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::rule-runner>>[init]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Runner {
     pub command: String,
     pub args: Vec<String>,

@@ -8,7 +8,7 @@ The crate consists of a library and a binary. The library exports the modules th
 pub mod template_strings;
 pub mod noodles;
 pub mod tasks;
-pub mod data;
+pub mod loader;
 ```
 
 The binary is the `brei` command-line program.

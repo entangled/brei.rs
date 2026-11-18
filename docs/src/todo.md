@@ -1,7 +1,7 @@
 To do
 =====
 
-The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding program resolution.
+The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding the program loader.
 
 Done so far
 -----------
@@ -37,20 +37,12 @@ Done so far
   - Delayed rules only get their targets filled in during resolution; the rest of the rule stays a template that is expanded when it runs.
   - `fill` substitutes some variables and leaves the others, keeping `$$` escapes intact. Python unescapes `$$` once per substitution, so a `$$` in a called template ends up as a variable there.
   - Included programs are read by a function `&dyn Fn(&Path) -> Result<Program, String>` that the caller passes in.
+- **Loading programs** (`program_loader.md`, `src/loader.rs`): `Program`, `Call`, `Argument`, `Join`, `RuleTemplate` and `Runner` derive `Deserialize` and refuse unknown fields. `loader::read_program(dir, input)` reads `file[section]` (TOML or JSON), or finds `brei.toml` or `[tool.brei]` in `pyproject.toml`. `loader::load_include` is the include loader for `tasks::resolve`. Rule errors during resolution name the rule (`RuleTemplate::label`). `data.rs` is gone. All examples in `../brei/examples` deserialize.
 
 Remaining work
 --------------
 
-In the suggested order. Items 1 to 4 are done.
-
-### 5. Loading programs
-
-`data.rs` and `program_loader.md` have the serde structs. These should become `Deserialize` for `tasks::Program`, `Call`, `Argument`, `Join`, `RuleTemplate` and `Runner` (`program.md`), and `data.rs` can then go. The loader for includes is the function passed to `tasks::resolve`.
-
-- Read TOML from a file, or from a section of `pyproject.toml` (`read_from_file` in `construct.py`).
-- Refuse unknown fields (Python uses `forbid_unknown_fields`).
-- Convert into `Rule` and `Runner`: there are two `Runner` types now, the serde one in `data.rs` and `tasks::Runner`.
-- Variable names used both as `var(x)` and `listvar(x)` give a `TypeMismatch` from `Targets::intern`. Report it as a user error that points at the rule. `ProgramError::Rule` doesn't say which rule yet.
+In the suggested order. Items 1 to 5 are done.
 
 ### 6. CLI
 
@@ -74,7 +66,7 @@ Port the examples and tests in `../brei/test` as integration tests, to check tha
 
 ### 9. Housekeeping
 
-- Remove the unused `futures` dependency. `toml` will be needed for item 5.
+- Remove the unused `futures` dependency.
 - Maybe move to edition 2024, which allows `let` chains in the kernel.
 
 Known limitations

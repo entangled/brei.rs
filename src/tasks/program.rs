@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use serde::Deserialize;
 use crate::noodles::kernel::Kernel;
 use crate::noodles::task::{Error, Worker};
 use crate::template_strings::Env;
@@ -13,7 +14,8 @@ use super::target::{Target, TypeMismatch, VarType};
 use super::template::{RuleTemplate, escape, splice_name, substitute, variables};
 
 // ~/~ begin <<docs/src/program.md#program::program-types>>[init]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Program {
     pub task: Vec<RuleTemplate>,
     pub environment: BTreeMap<String, String>,
@@ -23,31 +25,37 @@ pub struct Program {
     pub runner: HashMap<String, Runner>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Join {
     #[default]
     Inner,
     Outer,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
 pub enum Argument {
     Single(String),
     Multiple(Vec<String>),
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Call {
     pub template: String,
     pub args: BTreeMap<String, Argument>,
+    #[serde(default)]
     pub collect: Option<String>,
+    #[serde(default)]
     pub join: Join,
 }
 // ~/~ end
 // ~/~ begin <<docs/src/program.md#program::program-error>>[init]
 #[derive(Debug)]
 pub enum ProgramError {
-    Rule(RuleError),
+    Rule(String, RuleError),
+    TypeMismatch(TypeMismatch),
     MissingTemplate(String),
     MissingInclude(PathBuf),
     Load(PathBuf, String),
@@ -57,15 +65,9 @@ pub enum ProgramError {
     Build(Error<Job>),
 }
 
-impl From<RuleError> for ProgramError {
-    fn from(e: RuleError) -> Self {
-        ProgramError::Rule(e)
-    }
-}
-
 impl From<TypeMismatch> for ProgramError {
     fn from(e: TypeMismatch) -> Self {
-        ProgramError::Rule(RuleError::TypeMismatch(e))
+        ProgramError::TypeMismatch(e)
     }
 }
 
@@ -78,7 +80,8 @@ impl From<Error<Job>> for ProgramError {
 impl fmt::Display for ProgramError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProgramError::Rule(e) => write!(f, "{e}"),
+            ProgramError::Rule(rule, e) => write!(f, "in {rule}: {e}"),
+            ProgramError::TypeMismatch(e) => write!(f, "{e}"),
             ProgramError::MissingTemplate(name) => write!(f, "template `{name}` not found"),
             ProgramError::MissingInclude(path) => write!(f, "include `{}` not found", path.display()),
             ProgramError::Load(path, msg) => write!(f, "can't read `{}`: {msg}", path.display()),
@@ -216,16 +219,21 @@ impl<'a, W: Worker<Job>> Resolver<'a, W> {
         let names: BTreeSet<String> = ready.iter().flat_map(|r| r.target_variables()).map(String::from).collect();
         let env: Env = self.env(names.iter().map(String::as_str))?.into_iter().map(|(k, v)| (k, escape(&v))).collect();
         for rule in ready {
-            self.db.add_template(rule.fill_targets(&env))?;
+            self.add_rule(rule.fill_targets(&env))?;
         }
         Ok(waiting)
+    }
+
+    fn add_rule(&self, rule: RuleTemplate) -> Result<(), ProgramError> {
+        let label = rule.label();
+        self.db.add_template(rule).map_err(|e| ProgramError::Rule(label, e))
     }
 
     /// Add rules, or delay them if their targets have variables.
     fn add(&mut self, rules: Vec<RuleTemplate>, delayed: &mut Vec<RuleTemplate>) -> Result<(), ProgramError> {
         for rule in rules {
             if rule.target_variables().is_empty() {
-                self.db.add_template(rule)?;
+                self.add_rule(rule)?;
             } else {
                 delayed.push(rule);
             }
@@ -265,7 +273,8 @@ impl<'a, W: Worker<Job>> Resolver<'a, W> {
 
     fn resolve(&mut self, program: Program) -> Result<(), ProgramError> {
         for (name, template) in &program.environment {
-            self.db.add_variable(name, template)?;
+            self.db.add_variable(name, template)
+                .map_err(|e| ProgramError::Rule(format!("environment variable `{name}`"), e))?;
         }
         for (name, runner) in program.runner {
             self.db.add_runner(&name, runner);
