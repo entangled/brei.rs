@@ -27,7 +27,7 @@ Install Brei with Cargo:
 cargo install --git https://github.com/entangled/brei.rs
 ```
 
-Then `brei` should be available as a command-line executable. Without `-i`, it reads `brei.toml`, or the `[tool.brei]` section of `pyproject.toml`.
+Then `brei` should be available as a command-line executable. Without `-i`, it reads `brei.toml`, `brei.yaml`, or the `[tool.brei]` section of `pyproject.toml`, whichever it finds first.
 
 ```bash
 #| classes: [eval]

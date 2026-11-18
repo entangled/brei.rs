@@ -3,7 +3,7 @@ Program Loader
 
 A Brei [program](./program.md) is read from a TOML, YAML (`.yaml` or `.yml`) or JSON file, depending on its extension. It can also be a section of a bigger file: a Python project can keep its workflow in `pyproject.toml`, under `[tool.brei]`. Sections are written with dots, `tool.brei`.
 
-On the command line, a section is given in brackets after the file name: `pyproject.toml[tool.brei]`. Without an input file, Brei looks for `brei.toml`, and then for a `[tool.brei]` section in `pyproject.toml`.
+On the command line, a section is given in brackets after the file name: `pyproject.toml[tool.brei]`. Without an input file, Brei looks for `brei.toml`, then for `brei.yaml`, and then for a `[tool.brei]` section in `pyproject.toml`.
 
 ```rust
 //| file: src/loader.rs
@@ -45,7 +45,7 @@ impl fmt::Display for LoadError {
             LoadError::Invalid(path, msg) => write!(f, "in `{}`: {msg}", path.display()),
             LoadError::MissingSection(path, section) => write!(f, "`{}` should contain a section `{section}`", path.display()),
             LoadError::NoInput => write!(f,
-                "no input file given, and no `brei.toml`, or `pyproject.toml` with a `[tool.brei]` section, was found"),
+                "no input file given, and no `brei.toml`, `brei.yaml`, or `pyproject.toml` with a `[tool.brei]` section, was found"),
         }
     }
 }
@@ -109,9 +109,11 @@ pub fn read_program(dir: &Path, input: Option<&str>) -> Result<Program, LoadErro
         let (file, section) = split_input(input);
         return read_from_file(&dir.join(file), section);
     }
-    let brei = dir.join("brei.toml");
-    if brei.exists() {
-        return read_from_file(&brei, None);
+    for name in ["brei.toml", "brei.yaml"] {
+        let brei = dir.join(name);
+        if brei.exists() {
+            return read_from_file(&brei, None);
+        }
     }
     let pyproject = dir.join("pyproject.toml");
     if pyproject.exists() {
@@ -259,7 +261,7 @@ fn invalid() {
 }
 ```
 
-Programs can be in a section of a file, also in JSON and YAML. Without an input file, `brei.toml` comes first, then `pyproject.toml`.
+Programs can be in a section of a file, also in JSON and YAML. Without an input file, `brei.toml` comes first, then `brei.yaml`, then `pyproject.toml`.
 
 ```rust
 //| id: loader-tests
@@ -272,6 +274,8 @@ fn sections() {
 
     write(&dir, "pyproject.toml", "[tool.brei]\ninclude = [\"pyproject\"]\n");
     assert_eq!(read_program(dir.path(), None).unwrap().include, ["pyproject"]);
+    write(&dir, "brei.yaml", "include: [yaml]\n");
+    assert_eq!(read_program(dir.path(), None).unwrap().include, ["yaml"]);
     write(&dir, "brei.toml", "include = [\"brei\"]\n");
     assert_eq!(read_program(dir.path(), None).unwrap().include, ["brei"]);
 

@@ -26,7 +26,7 @@ cargo install --git https://github.com/entangled/brei.rs
 
 ## Usage
 
-Brei reads `brei.toml`, or the `[tool.brei]` section of `pyproject.toml`. Use `-i` to read another file.
+Brei reads `brei.toml`, `brei.yaml`, or the `[tool.brei]` section of `pyproject.toml`, whichever it finds first. Use `-i` to read another file.
 
 ```
 brei all                         # build the task named `all`
