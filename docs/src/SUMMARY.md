@@ -6,3 +6,4 @@
 - [Brei](./brei.md)
 - [Programs](./program.md)
 - [Template Strings](./template_strings.md)
+- [Compatibility](./compat.md)

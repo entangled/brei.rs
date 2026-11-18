@@ -1,7 +1,7 @@
 To do
 =====
 
-The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding logging.
+The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after porting the Python tests.
 
 Done so far
 -----------
@@ -44,15 +44,12 @@ Done so far
   - Debug messages: rules that are up to date, each command that runs, and steps in program resolution.
   - Failures from running or expanding a rule are wrapped in `Failure::Rule(note, failure)`, so error messages say which rule failed.
   - The binary has a small logger on stderr: notes in colour, backticks in bold, `--debug` for debug messages, and no colour off a terminal or with `NO_COLOR`.
+- **Tests against Python Brei** (`compat.md`, `tests/python.rs`): the tests from `test_program.py`, `test_history.py`, `test_construct.py` and the file-level tests of `test_lazy.py`, and the examples from the Python documentation (except `force_run`, which needs `coverage`), run the `brei` binary. They need `python` and `git`; the Lua example is skipped without `lua`. The chapter lists the deliberate differences from Python. The `versioned_output` example makes a broken `output/latest` link; that is a mistake in the example itself, not in Brei.
 
 Remaining work
 --------------
 
-In the suggested order. Items 1 to 7 are done.
-
-### 8. Tests against Python Brei
-
-Port the examples and tests in `../brei/test` as integration tests, to check that we behave the same as the original.
+In the suggested order. Items 1 to 8 are done.
 
 ### 9. Housekeeping
 
