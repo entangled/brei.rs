@@ -199,7 +199,6 @@ fn hello() -> Program {
     Program { task: vec![task], ..Default::default() }
 }
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn run_program() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -432,7 +431,6 @@ runner = "bash"
 script = "echo run >> log.txt; echo hello > hello.txt"
 "#;
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn build() {
     let dir = setup(HELLO);
@@ -462,7 +460,6 @@ creates = ["ok.txt"]
 script = "touch ok.txt"
 "#;
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn failure() {
     let dir = setup(FAILING);
@@ -481,7 +478,6 @@ The output of commands is logged, with the note of the rule. With `--debug`, we 
 
 ```rust
 //| id: cli-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn logging() {
     let dir = setup(r#"
@@ -510,7 +506,6 @@ Input files, with a section, and errors in reading them.
 
 ```rust
 //| id: cli-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn input_file() {
     let dir = TempDir::new().unwrap();

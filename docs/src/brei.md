@@ -1634,7 +1634,6 @@ A simple rule, and a chain of rules. The second time, nothing needs to be done. 
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn hello() {
     let dir = TempDir::new().unwrap();
@@ -1644,7 +1643,6 @@ fn hello() {
     assert_eq!(read(&dir, "hello.txt"), "hello\n");
 }
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn up_to_date() {
     let dir = TempDir::new().unwrap();
@@ -1672,7 +1670,6 @@ Variables pass values between rules, through standard output and input.
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn variables() {
     let dir = TempDir::new().unwrap();
@@ -1697,7 +1694,6 @@ A rule that writes to a variable and also creates a file runs every time, so tha
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn variable_and_file() {
     let dir = TempDir::new().unwrap();
@@ -1714,7 +1710,6 @@ A rule that creates several targets runs once, even when its targets are built i
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn several_targets() {
     let dir = TempDir::new().unwrap();
@@ -1737,7 +1732,6 @@ Dependencies that are files without a rule are fine, as long as they exist.
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn missing_dependency() {
     let dir = TempDir::new().unwrap();
@@ -1758,7 +1752,6 @@ A failing command fails the rule, and so does a rule that doesn't create its tar
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn failing_rules() {
     let dir = TempDir::new().unwrap();
@@ -1780,7 +1773,6 @@ When one rule fails, a slow command that runs in parallel is killed.
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn cancel() {
     let dir = TempDir::new().unwrap();
@@ -1870,7 +1862,6 @@ The history carries over to a new database, through the history file. A rule who
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn persistent_history() {
     let dir = TempDir::new().unwrap();
@@ -1911,7 +1902,6 @@ Several targets are built in one run, in parallel, sharing their dependencies. N
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn build_several() {
     let dir = TempDir::new().unwrap();
@@ -1947,7 +1937,6 @@ fn template(creates: &[&str], requires: &[&str], script: &str) -> RuleTemplate {
     RuleTemplate { creates: strings(creates), requires: strings(requires), script: Some(script.into()), ..Default::default() }
 }
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn environment() {
     let dir = TempDir::new().unwrap();
@@ -1970,7 +1959,6 @@ The output of a template rule can go to a variable, and the values of variables 
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn template_variables() {
     let dir = TempDir::new().unwrap();
@@ -1992,7 +1980,6 @@ Splicing a list variable into `requires` makes all its elements dependencies. Th
 
 ```rust
 //| id: task-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn splice() {
     let dir = TempDir::new().unwrap();

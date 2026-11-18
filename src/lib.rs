@@ -147,7 +147,6 @@ mod tests {
         Program { task: vec![task], ..Default::default() }
     }
 
-    #[cfg_attr(windows, ignore = "uses Unix tools")]
     #[test]
     fn run_program() {
         let dir = tempfile::TempDir::new().unwrap();

@@ -416,7 +416,6 @@ mod tests {
     }
     // ~/~ end
     // ~/~ begin <<docs/src/program.md#program::program-tests>>[1]
-    #[cfg_attr(windows, ignore = "uses Unix tools")]
     #[test]
     fn calls() {
         let mut s = Setup::new();
@@ -452,7 +451,6 @@ mod tests {
     }
     // ~/~ end
     // ~/~ begin <<docs/src/program.md#program::program-tests>>[2]
-    #[cfg_attr(windows, ignore = "uses Unix tools")]
     #[test]
     fn delayed_targets() {
         let mut s = Setup::new();
@@ -473,7 +471,6 @@ mod tests {
     }
     // ~/~ end
     // ~/~ begin <<docs/src/program.md#program::program-tests>>[3]
-    #[cfg_attr(windows, ignore = "uses Unix tools")]
     #[test]
     fn includes() {
         let mut s = Setup::new();
@@ -494,7 +491,6 @@ mod tests {
     }
     // ~/~ end
     // ~/~ begin <<docs/src/program.md#program::program-tests>>[4]
-    #[cfg_attr(windows, ignore = "uses Unix tools")]
     #[test]
     fn splice_arguments() {
         let mut s = Setup::new();
@@ -515,7 +511,6 @@ mod tests {
     }
     // ~/~ end
     // ~/~ begin <<docs/src/program.md#program::program-tests>>[5]
-    #[cfg_attr(windows, ignore = "uses Unix tools")]
     #[test]
     fn errors() {
         let missing_template = Program { call: vec![call("nothere", &[])], ..Default::default() };

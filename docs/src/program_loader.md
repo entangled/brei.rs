@@ -197,7 +197,6 @@ A sample program, with all the parts of a program. It also runs.
 
 ```rust
 //| id: loader-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn sample() {
     let dir = TempDir::new().unwrap();
@@ -220,7 +219,6 @@ The same parts of a program in YAML.
 
 ```rust
 //| id: loader-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn yaml() {
     let dir = TempDir::new().unwrap();

@@ -220,7 +220,6 @@ name = "all"
 requires = ["#inner", "#outer"]
 "##;
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn workflows() {
     let hello: &[(&str, &str)] = &[("hello.txt", "Hello, World")];
@@ -260,7 +259,6 @@ name = "all"
 requires = ["#forced", "#unforced"]
 "##;
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn forcing() {
     let workflow = Workflow::new(FORCE_RUN);
@@ -422,7 +420,6 @@ args = { a = ["splice(names)"], b = ["1", "2", "3"] }
 const WF1: &str = r##"{"task": [{"stdout": "x", "script": "echo 'hello'"}, {"name": "all", "requires": ["x"]}]}"##;
 const WF2: &str = r##"{"task": [{"stdout": "x", "script": "echo 'goodbye'"}, {"name": "all", "requires": ["x"]}]}"##;
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn history() {
     let workflow = Workflow::new("");
@@ -568,7 +565,6 @@ name = "clean"
 script = "rm hello.txt"
 "##;
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn example_tasks() {
     let workflow = Workflow::new(TASKS_EXAMPLE);
@@ -578,7 +574,7 @@ fn example_tasks() {
     assert!(!workflow.exists("hello.txt"));
 }
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
+#[cfg_attr(windows, ignore = "`mktemp` in Git Bash gives a Unix path")]
 #[test]
 fn example_rot13() {
     let log = Workflow::new(ROT13_EXAMPLE).run(&["all"]);
@@ -619,18 +615,13 @@ name = "all"
 requires = ["#inner", "#outer"]
 "##;
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
+#[cfg_attr(windows, ignore = "`mktemp` in Git Bash gives a Unix path")]
 #[test]
 fn example_template_multiplexing() {
-    let workflow = Workflow::new(MULTIPLEXING_EXAMPLE);
-    workflow.run(&["all"]);
-    let tmp = fs::read_dir(workflow.dir.path()).unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.is_dir())
-        .expect("temporary directory");
-    let mut files: Vec<String> = fs::read_dir(tmp).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
-    files.sort();
-    assert_eq!(files, ["inner-x-1", "inner-y-2", "inner-z-3", "outer-x-1", "outer-x-2", "outer-y-1", "outer-y-2"]);
+    let log = Workflow::new(MULTIPLEXING_EXAMPLE).run(&["all"]);
+    let mut notes: Vec<&str> = log.lines().filter(|l| l.starts_with("inner ") || l.starts_with("outer ")).collect();
+    notes.sort();
+    assert_eq!(notes, ["inner x 1", "inner y 2", "inner z 3", "outer x 1", "outer x 2", "outer y 1", "outer y 2"]);
 }
 // ~/~ end
 // ~/~ begin <<docs/src/compat.md#python-tests>>[11]
@@ -687,7 +678,7 @@ name = "all"
 requires = ["#write-outs"]
 "##;
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
+#[cfg_attr(windows, ignore = "`mktemp` in Git Bash gives a Unix path")]
 #[test]
 fn example_includes() {
     let workflow = Workflow::new(HELLO_INCLUDES_EXAMPLE);
@@ -779,7 +770,7 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success());
 }
 
-#[cfg_attr(windows, ignore = "uses Unix tools")]
+#[cfg_attr(windows, ignore = "`ln -s` in Git Bash can't make symbolic links")]
 #[test]
 fn example_versioned_output() {
     let workflow = Workflow::new(VERSIONED_OUTPUT_EXAMPLE);

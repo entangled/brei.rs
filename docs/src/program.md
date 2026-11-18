@@ -505,7 +505,6 @@ Calls fill in templates. Arguments can use variables from the environment, and l
 
 ```rust
 //| id: program-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn calls() {
     let mut s = Setup::new();
@@ -545,7 +544,6 @@ A rule with a variable in its targets waits until the variable is known. The rul
 
 ```rust
 //| id: program-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn delayed_targets() {
     let mut s = Setup::new();
@@ -570,7 +568,6 @@ Includes can be built by a rule, and their name can use variables. A call can us
 
 ```rust
 //| id: program-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn includes() {
     let mut s = Setup::new();
@@ -595,7 +592,6 @@ A call can splice list variables into its arguments.
 
 ```rust
 //| id: program-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn splice_arguments() {
     let mut s = Setup::new();
@@ -620,7 +616,6 @@ Missing templates, missing includes and targets that can't be resolved are error
 
 ```rust
 //| id: program-tests
-#[cfg_attr(windows, ignore = "uses Unix tools")]
 #[test]
 fn errors() {
     let missing_template = Program { call: vec![call("nothere", &[])], ..Default::default() };
