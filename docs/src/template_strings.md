@@ -29,9 +29,9 @@ fn test_format() {
     assert_eq!(
         dollar("$${${name}}").format(&env).unwrap(),
         "${Sara}");
-    assert!(matches!(
-        dollar("${name{").format(&env),
-        Err(Error::InvalidTemplate(_))));
+    assert_eq!(
+        dollar("${name{").format(&env).unwrap(),
+        "${name{");
     assert!(matches!(
         dollar("${number}").format(&env),
         Err(Error::MissingVariable(n)) if n == "number"));
@@ -251,10 +251,12 @@ mod tests {
 Dollar syntax
 -------------
 
+The dollar syntax follows Python's `string.Template`, as used by the Python version of Brei. A variable is written `$name` or `${name}`, where a name starts with a letter or underscore, followed by letters, digits and underscores. `$$` is a literal dollar sign. Any other dollar sign is left alone, like Python's `safe_substitute` does. That way, scripts can contain things like `$(pwd)`, `$1` or `${#array[@]}`, which are not Brei variables, without escaping them. So parsing a dollar template never fails.
+
 ```rust
 //| file: src/template_strings/dollar.rs
 use std::iter::Iterator;
-use super::result::{Result, Error};
+use super::result::Result;
 use super::item::Item;
 
 /// Iterates `Item` from a `&str` reference using a `${...}` type
@@ -268,22 +270,13 @@ pub fn dollar<'a, S>(s: S) -> Dollar<'a> where S: Into<&'a str> {
     Dollar {template: s.into()}
 }
 
-impl<'a> Dollar<'a> {
-    fn flush(&mut self) -> &'a str {
-        let (result, end) = self.template.split_at(self.template.len());
-        self.template = end;
-        return result;
+/// The length of the identifier at the start of `s`, if there is one.
+fn identifier(s: &str) -> Option<usize> {
+    let first = s.chars().next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
     }
-
-    fn error<T>(&mut self, msg: T) -> Result<Item<'a>>
-    where T: ToString {
-        self.flush();
-        Err(Error::InvalidTemplate(msg.to_string()))
-    }
-}
-
-fn valid_id_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+    Some(s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(s.len()))
 }
 
 impl<'a> Iterator for Dollar<'a> {
@@ -296,41 +289,31 @@ impl<'a> Iterator for Dollar<'a> {
             return None;
         }
 
-        if self.template.len() < 2 {
-            return Some(Ok(Literal(self.flush())));
-        }
+        let Some(rest) = self.template.strip_prefix('$') else {
+            let idx = self.template.find('$').unwrap_or(self.template.len());
+            let (result, rest) = self.template.split_at(idx);
+            self.template = rest;
+            return Some(Ok(Literal(result)));
+        };
 
-        let (first2, rest) = self.template.split_at(2);
-        if first2 == "$$" {
+        if let Some(rest) = rest.strip_prefix('$') {
             self.template = rest;
             return Some(Ok(Literal("$")));
         }
 
-        if first2 == "${" {
-            if let Some((name, rest)) = rest.split_once('}') {
-                self.template = rest;
-                return Some(Ok(Variable(name)));
+        if let Some(inner) = rest.strip_prefix('{') {
+            if let Some(n) = identifier(inner).filter(|n| inner[*n..].starts_with('}')) {
+                self.template = &inner[n + 1..];
+                return Some(Ok(Variable(&inner[..n])));
             }
-            return Some(self.error("unterminated '{...'"));
+        } else if let Some(n) = identifier(rest) {
+            self.template = &rest[n..];
+            return Some(Ok(Variable(&rest[..n])));
         }
 
-        let (first, rest) = self.template.split_at(1);
-        if first == "$" {
-            let idx = rest.find(|c| !valid_id_char(c))
-                .unwrap_or(rest.len());
-            let (name, rest) = rest.split_at(idx);
-            if name.is_empty() {
-                return Some(self.error("invalid identifier character"));
-            }
-            self.template = rest;
-            return Some(Ok(Variable(name)));
-        }
-
-        let idx = self.template.find(|c| c == '$')
-            .unwrap_or(self.template.len());
-        let (result, rest) = self.template.split_at(idx);
+        // not a variable, so a literal dollar sign
         self.template = rest;
-        return Some(Ok(Literal(result)))
+        Some(Ok(Literal("$")))
     }
 }
 
@@ -339,6 +322,7 @@ impl<'a> Iterator for Dollar<'a> {
 mod tests {
     use super::*;
     use super::super::format::{Format, Env};
+    use super::super::result::Error;
     use Item::{Literal, Variable};
 
     #[test]
@@ -351,13 +335,14 @@ mod tests {
         let re2: Result<Vec<Item>> = it2.collect();
         assert_eq!(re2.unwrap(), vec![Literal("Hello, "), Variable("name"), Literal("!")]);
 
-        let it3 = dollar("Hello, $}name{");
+        let it3 = dollar("$1 $(pwd) ${a b} ${#x[@]} ${name 5$");
         let re3: Result<Vec<Item>> = it3.collect();
-        assert!(matches!(re3, Err(Error::InvalidTemplate(_))));
+        let text: String = re3.unwrap().iter().map(|i| match i { Literal(s) => *s, Variable(_) => panic!() }).collect();
+        assert_eq!(text, "$1 $(pwd) ${a b} ${#x[@]} ${name 5$");
 
-        let it4 = dollar("Hell, ${name");
+        let it4 = dollar("$a1_b-c ${_x}y");
         let re4: Result<Vec<Item>> = it4.collect();
-        assert!(matches!(re4, Err(Error::InvalidTemplate(_))));
+        assert_eq!(re4.unwrap(), vec![Variable("a1_b"), Literal("-c "), Variable("_x"), Literal("y")]);
 
         let it5 = dollar("$$ Literal $$");
         let re5: Result<Vec<Item>> = it5.collect();

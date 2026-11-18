@@ -1,7 +1,7 @@
 To do
 =====
 
-The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding `build_all`.
+The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding templates.
 
 Done so far
 -----------
@@ -25,21 +25,17 @@ Done so far
   - The entry point is `tasks::build`.
 - **Persistent history** (`brei.md`, `src/tasks/history.rs`): `TaskDb::load_history` and `save_history` read and write a JSON file (`HISTORY_FILE`, `.brei_history`) that maps paths to digests. A missing file is an empty history; saving writes a temporary file and renames it. This is not compatible with Python history files that contain `null` digests.
 - **Several targets** (`brei.md`, `src/tasks/job.rs`): `tasks::build_all` builds a list of targets in one run, through a local `Job::All` that waits for all of them. Its result is `()`; use `build` for the value of a single target.
+- **Variables and templates** (`brei.md`, `src/tasks/template.rs`, `template_strings.md`):
+  - The dollar parser now follows Python's `safe_substitute`: `$1`, `$(...)` and `${a b}` are left alone, so parsing never fails.
+  - The database holds *recipes*: a rule (`Arc<Entry>`), a template (`RuleTemplate`, the Python `TaskProxy`), or an environment variable (`TaskDb::add_variable`).
+  - `TaskDb::add_template` checks the template. One without variables or splices is expanded right away (so `$$` becomes `$`) and added as a rule.
+  - A template's targets must be fixed; variables in targets are an error here, to be handled by program resolution (item 4).
+  - The `Expand` job substitutes, splices, interns the new rule at run time and continues with building its dependencies and running it. Expanded rules never enter the database, which answers the open question about interior mutability: the rule index stays frozen.
 
 Remaining work
 --------------
 
-In the suggested order. Items 1 (persistent history) and 2 (building several targets) are done.
-
-### 3. Variables and templates
-
-From `TemplateVariable` and `TemplateTask` in `task.py`:
-
-- An `environment` entry in a program is a variable whose value is a template string. It depends on the variables used in that template.
-- A rule with `${...}` in its fields is a template task. It depends on the variables it uses, and when it runs, it substitutes them and becomes a real rule. This fits continuations naturally: the job substitutes, then continues with building the new rule's dependencies and running it.
-- `splice(name)` in `requires` (or in call arguments) inserts the elements of a list variable. Spliced paths are new targets, interned at run time from worker threads. The `RwLock` on `Targets` is there for this.
-- The `template_strings` module (`dollar`, `Env`, `Format`) does the substitution.
-- Open question: rules are added to `TaskDb` through `&mut` before running, and the database is frozen in an `Arc` while running. Template tasks create rules at run time, so the rule index needs interior mutability (a `RwLock`), or template rules need to be kept apart from the frozen rules.
+In the suggested order. Items 1 to 3 are done.
 
 ### 4. Program resolution
 
@@ -47,7 +43,7 @@ From `resolve_tasks` in `program.py`:
 
 - `call`: expand templates, with `join` being inner or outer (`TemplateCall.all_args`).
 - `include`: read further programs. An include may have to be built by a task first.
-- Delayed calls, and templates with templated targets, are resolved once their variables are known.
+- Delayed calls, and templates with templated targets, are resolved once their variables are known. `TaskDb::add_template` refuses variables in targets, so substitute those before adding.
 - An error if targets remain unresolvable.
 
 In Python this is a separate async pass before the build. It could also run as an engine computation, with includes and delayed templates as continuations.
@@ -93,6 +89,7 @@ Known limitations
 - **Local cycles:** cycles between local tasks within one promise aren't detected; the run ends with `NoResult`. Cycles through targets are detected.
 - **Standard input:** a command without `stdin` reads from `/dev/null`, not from the terminal. This differs from Python, on purpose.
 - **Empty variables:** a scalar variable with empty output is `""`, where Python gives `None`.
+- **Variables without a value:** a template that uses a variable whose value is `Value::Nothing` (see below) fails with "variable has no value".
 - **Skipped variable rules:** a rule that writes to a variable *and* creates files gives the value `Value::Nothing` when it is up to date and doesn't run. Python has the same problem.
 
 Conventions

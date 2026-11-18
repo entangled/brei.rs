@@ -19,7 +19,7 @@ pub enum Target {
 }
 
 // ~/~ begin <<docs/src/brei.md#brei::target-parse>>[init]
-fn wrapped<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+pub(super) fn wrapped<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     let name = s.strip_prefix(prefix)?.strip_prefix('(')?.strip_suffix(')')?;
     let valid = !name.is_empty() && !name.contains(|c: char| c.is_whitespace() || c == '(' || c == ')');
     valid.then_some(name)

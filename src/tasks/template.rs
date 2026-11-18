@@ -1,0 +1,157 @@
+// ~/~ begin <<docs/src/brei.md#brei::src/tasks/template.rs>>[init]
+use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
+use crate::template_strings::{dollar, Env, Error, Format, Item};
+use super::db::{Kind, Recipe, TaskDb};
+use super::rule::{Failure, Rule, RuleError};
+use super::target::{wrapped, Target, VarType};
+
+#[derive(Clone, Debug, Default)]
+pub struct RuleTemplate {
+    pub creates: Vec<String>,
+    pub requires: Vec<String>,
+    pub name: Option<String>,
+    pub runner: Option<String>,
+    pub path: Option<String>,
+    pub script: Option<String>,
+    pub stdin: Option<String>,
+    pub stdout: Option<String>,
+    pub description: Option<String>,
+    pub force: bool,
+}
+
+/// The values of list variables, by name.
+pub(super) type Lists = HashMap<String, Vec<String>>;
+
+/// Names of the variables in a template string.
+pub(super) fn variables(s: &str) -> impl Iterator<Item=&str> {
+    dollar(s).filter_map(|item| match item {
+        Ok(Item::Variable(name)) => Some(name),
+        _ => None,
+    })
+}
+
+pub(super) fn substitute(s: &str, env: &Env) -> Result<String, Failure> {
+    dollar(s).format(env).map_err(|e| Failure::Template(match e {
+        Error::MissingVariable(name) => format!("variable `{name}` has no value"),
+        Error::InvalidTemplate(msg) => msg,
+    }))
+}
+
+fn splice_name(s: &str) -> Option<&str> {
+    wrapped(s, "splice")
+}
+
+fn parse(s: String) -> Result<Target, Failure> {
+    s.parse().map_err(|_| Failure::Template("empty target".into()))
+}
+
+impl RuleTemplate {
+    /// The targets: `creates`, `stdout` and the phony target `#name`.
+    fn targets(&self) -> Vec<String> {
+        self.creates.iter().cloned()
+            .chain(self.stdout.clone())
+            .chain(self.name.as_ref().map(|n| format!("#{n}")))
+            .collect()
+    }
+
+    fn strings(&self) -> impl Iterator<Item=&String> {
+        let fields = [&self.name, &self.runner, &self.path, &self.script, &self.stdin, &self.stdout, &self.description];
+        self.creates.iter().chain(&self.requires).chain(fields.into_iter().flatten())
+    }
+
+    /// Names of the variables used in the template.
+    pub fn variables(&self) -> BTreeSet<&str> {
+        self.strings().flat_map(|s| variables(s)).collect()
+    }
+
+    /// Names of the list variables spliced into `requires`.
+    pub fn splices(&self) -> BTreeSet<&str> {
+        self.requires.iter().filter_map(|s| splice_name(s)).collect()
+    }
+
+    fn check(&self) -> Result<(), RuleError> {
+        let invalid = |msg: String| Err(RuleError::Invalid(msg));
+        let targets = self.targets();
+        if let Some(t) = targets.iter().find(|t| variables(t).next().is_some()) {
+            return invalid(format!("the targets of a rule can't contain variables, found `{t}`"));
+        }
+        let inputs = || self.stdin.iter().chain(&self.path);
+        if let Some(s) = self.creates.iter().chain(&self.requires).chain(inputs()).find(|s| wrapped(s, "listvar").is_some()) {
+            return invalid(format!("`{s}` can only be used as `stdout` of a rule"));
+        }
+        if let Some(s) = targets.iter().chain(inputs()).find(|s| splice_name(s).is_some()) {
+            return invalid(format!("`{s}` can only be used in `requires`"));
+        }
+        Ok(())
+    }
+
+    /// Substitute variables and splice lists, giving a rule.
+    pub(super) fn expand(&self, env: &Env, lists: &Lists) -> Result<Rule, Failure> {
+        let sub = |s: &Option<String>| s.as_deref().map(|s| substitute(s, env)).transpose();
+        let target = |s: &str| parse(substitute(s, env)?);
+
+        let mut requires = Vec::new();
+        for s in &self.requires {
+            match splice_name(s) {
+                Some(name) => {
+                    let items = lists.get(name)
+                        .ok_or_else(|| Failure::Template(format!("list variable `{name}` has no value")))?;
+                    for item in items {
+                        requires.push(parse(item.clone())?);
+                    }
+                }
+                None => requires.push(target(s)?),
+            }
+        }
+
+        Ok(Rule {
+            creates: self.creates.iter().map(|s| target(s)).collect::<Result<_, _>>()?,
+            requires,
+            name: sub(&self.name)?,
+            runner: sub(&self.runner)?,
+            path: sub(&self.path)?.map(PathBuf::from),
+            script: sub(&self.script)?,
+            stdin: sub(&self.stdin)?.map(parse).transpose()?,
+            stdout: sub(&self.stdout)?.map(parse).transpose()?,
+            description: sub(&self.description)?,
+            force: self.force,
+        })
+    }
+}
+
+fn scalar(name: &str) -> Target {
+    Target::Variable(name.to_string(), VarType::Scalar)
+}
+
+impl TaskDb {
+    /// Add a rule that may use variables.
+    pub fn add_template(&mut self, template: RuleTemplate) -> Result<(), RuleError> {
+        template.check()?;
+        let invalid = |f: Failure| RuleError::Invalid(f.to_string());
+        let (vars, lists) = (template.variables(), template.splices());
+        if vars.is_empty() && lists.is_empty() {
+            let rule = template.expand(&Env::new(), &Lists::new()).map_err(invalid)?;
+            return self.add(rule);
+        }
+
+        let requires = vars.iter().map(|v| scalar(v))
+            .chain(lists.iter().map(|v| Target::Variable(v.to_string(), VarType::List)))
+            .map(|t| self.targets.intern(&t))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut creates = Vec::new();
+        for t in template.targets() {
+            let t = parse(substitute(&t, &Env::new()).map_err(invalid)?).map_err(invalid)?;
+            creates.push(self.targets.intern(&t)?);
+        }
+        self.insert(Recipe { creates, requires, kind: Kind::Template(template) })
+    }
+
+    /// Add a variable whose value is a template string.
+    pub fn add_variable(&mut self, name: &str, template: &str) -> Result<(), RuleError> {
+        let creates = vec![self.targets.intern(&scalar(name))?];
+        let requires = variables(template).map(|v| self.targets.intern(&scalar(v))).collect::<Result<Vec<_>, _>>()?;
+        self.insert(Recipe { creates, requires, kind: Kind::Variable(template.to_string()) })
+    }
+}
+// ~/~ end

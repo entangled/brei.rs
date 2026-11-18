@@ -242,4 +242,94 @@ fn build_several() {
     assert!(dir.path().join("b.txt").exists() && dir.path().join("c.txt").exists());
 }
 // ~/~ end
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[9]
+fn template(creates: &[&str], requires: &[&str], script: &str) -> RuleTemplate {
+    let strings = |ts: &[&str]| ts.iter().map(|t| t.to_string()).collect();
+    RuleTemplate { creates: strings(creates), requires: strings(requires), script: Some(script.into()), ..Default::default() }
+}
+
+#[test]
+fn environment() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join("data")).unwrap();
+    fs::write(dir.path().join("data/input.txt"), "hello").unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add_variable("dir", "data").unwrap();
+    db.add_variable("input", "${dir}/input.txt").unwrap();
+    db.add(Rule { stdout: Some(target("var(output)")), ..rule(&[], &[], "echo output.txt") }).unwrap();
+    db.add_template(template(&["output.txt"], &["${input}"], "cp ${input} ${output}")).unwrap();
+    let db = Arc::new(db);
+
+    assert_eq!(run(&db, "var(input)").unwrap(), Value::Scalar("data/input.txt".into()));
+    run(&db, "output.txt").unwrap();
+    assert_eq!(read(&dir, "output.txt"), "hello");
+}
+// ~/~ end
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[10]
+#[test]
+fn template_variables() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add_variable("name", "greeting").unwrap();
+    db.add(Rule { stdout: Some(target("var(greeting)")), ..rule(&[], &[], "echo hello") }).unwrap();
+    db.add_template(RuleTemplate {
+        stdin: Some("var(${name})".into()), stdout: Some("var(shout)".into()), ..template(&[], &[], "tr a-z A-Z")
+    }).unwrap();
+    db.add_template(RuleTemplate { stdout: Some("var(dollars)".into()), ..template(&[], &[], "echo $$1 $1 $(x)") }).unwrap();
+    let db = Arc::new(db);
+
+    assert_eq!(run(&db, "var(shout)").unwrap(), Value::Scalar("HELLO".into()));
+    assert_eq!(run(&db, "var(dollars)").unwrap(), Value::Scalar("$1 $1 $(x)".into()));
+}
+// ~/~ end
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[11]
+#[test]
+fn splice() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("c.txt"), "c\n").unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(Rule { stdout: Some(target("listvar(files)")), ..rule(&[], &[], r"printf 'a.txt\nb.txt\nc.txt\n'") }).unwrap();
+    db.add(bash(&["a.txt"], &[], "echo a > a.txt")).unwrap();
+    db.add(bash(&["b.txt"], &[], "echo b > b.txt")).unwrap();
+    db.add_template(RuleTemplate {
+        runner: Some("bash".into()),
+        ..template(&["all.txt"], &["splice(files)"], "cat a.txt b.txt c.txt > all.txt")
+    }).unwrap();
+    db.add_template(template(&["d.txt"], &["splice(files)", "nothere.txt"], "touch d.txt")).unwrap();
+    let db = Arc::new(db);
+
+    run(&db, "all.txt").unwrap();
+    assert_eq!(read(&dir, "all.txt"), "a\nb\nc\n");
+    assert_eq!(failures(run(&db, "d.txt")), [Failure::Missing(target("nothere.txt"))]);
+}
+// ~/~ end
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[12]
+#[test]
+fn invalid_templates() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add_template(template(&["a.txt"], &[], "touch ${unknown}")).unwrap();
+    db.add_variable("x", "${y}").unwrap();
+    assert_eq!(db.add_variable("x", "1"), Err(RuleError::Duplicate(target("var(x)"))));
+    db.add(Rule { stdout: Some(target("listvar(list)")), ..rule(&[], &[], "true") }).unwrap();
+    assert!(matches!(db.add_template(template(&["b.txt"], &[], "echo ${list}")), Err(RuleError::TypeMismatch(_))));
+    assert!(matches!(db.add_template(template(&["b.txt"], &["splice(x)"], "true")), Err(RuleError::TypeMismatch(_))));
+
+    let invalid = [
+        template(&["${x}.txt"], &[], "true"),
+        RuleTemplate { name: Some("${x}".into()), ..template(&[], &[], "true") },
+        template(&["c.txt"], &["listvar(list)"], "true"),
+        template(&["listvar(list)"], &[], "true"),
+        template(&["splice(list)"], &[], "true"),
+        RuleTemplate { stdin: Some("splice(list)".into()), ..template(&["c.txt"], &[], "cat") },
+    ];
+    for t in invalid {
+        assert!(matches!(db.add_template(t), Err(RuleError::Invalid(_))));
+    }
+
+    let db = Arc::new(db);
+    assert_eq!(failures(run(&db, "a.txt")), [Failure::Missing(target("var(unknown)"))]);
+    assert_eq!(failures(run(&db, "var(x)")), [Failure::Missing(target("var(y)"))]);
+}
+// ~/~ end
 // ~/~ end

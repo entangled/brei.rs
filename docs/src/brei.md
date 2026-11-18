@@ -16,6 +16,7 @@ This chapter builds Brei on top of the [engine](./engine.md): the tasks that Bre
 mod target;
 mod rule;
 mod db;
+mod template;
 mod history;
 mod exec;
 mod job;
@@ -26,6 +27,7 @@ mod tests;
 pub use target::{Target, VarType, TargetId, Targets, Key, EmptyTarget, TypeMismatch};
 pub use rule::{Rule, RuleError, Runner, Value, Failure, default_runners};
 pub use db::TaskDb;
+pub use template::RuleTemplate;
 pub use history::HISTORY_FILE;
 pub use job::{Job, build, build_all};
 ```
@@ -84,7 +86,7 @@ Paths are normalized a little bit, so that `./data.csv` and `data.csv` are the s
 
 ```rust
 //| id: target-parse
-fn wrapped<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+pub(super) fn wrapped<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     let name = s.strip_prefix(prefix)?.strip_prefix('(')?.strip_suffix(')')?;
     let valid = !name.is_empty() && !name.contains(|c: char| c.is_whitespace() || c == '(' || c == ')');
     valid.then_some(name)
@@ -576,25 +578,62 @@ impl Rule {
 The task database
 -----------------
 
-The task database holds everything the tasks share while running: the table of targets, the rules, and which rule creates which target. Commands run in the `root` directory, and paths are relative to it.
+The task database holds everything the tasks share while running: the table of targets, the recipes, and which recipe creates which target. Commands run in the `root` directory, and paths are relative to it.
+
+A *recipe* is anything that creates targets. There are three kinds:
+
+- a rule, ready to run;
+- a [template](#templates): a rule that uses variables. It is expanded into a rule once the values of those variables are known;
+- a variable from the environment, whose value is a template string.
+
+Each recipe knows the targets it creates, and what it requires before it can be used. For a rule, those are its dependencies. For a template or an environment variable, they are only the variables it uses: the dependencies of a template rule are only known once it is expanded.
+
+A rule is stored as an `Entry`, with its targets interned. Entries are shared through an `Arc`, because rules that are expanded from a template don't live in the database, only in the jobs that run them.
 
 The history remembers the digest of the rule that last created each file. It is shared by all tasks, which may run on different threads, so it is behind a `Mutex`. It is a `BTreeMap`, so that it is written to disk in a stable order.
 
-Rules are added before running anything, so adding takes a `&mut` reference; once all rules are in, the database goes into an `Arc` and is shared with the tasks. A target can only be created by one rule.
+Recipes are added before running anything, so adding takes a `&mut` reference; once all recipes are in, the database goes into an `Arc` and is shared with the tasks. A target can only be created by one recipe.
 
 ```rust
 //| file: src/tasks/db.rs
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use super::rule::{Rule, RuleError, Runner, default_runners};
 use super::target::{Target, TargetId, Targets};
+use super::template::RuleTemplate;
 
-pub(super) struct Entry {
+pub struct Entry {
     pub(super) rule: Rule,
     pub(super) creates: Vec<TargetId>,
     pub(super) requires: Vec<TargetId>,
     pub(super) stdin: Option<TargetId>,
+}
+
+impl Entry {
+    pub(super) fn new(rule: Rule, targets: &Targets) -> Result<Self, RuleError> {
+        let rule = rule.complete()?;
+        let intern = |ts: &[Target]| ts.iter().map(|t| targets.intern(t)).collect::<Result<Vec<_>, _>>();
+        let creates = intern(&rule.creates)?;
+        let requires = intern(&rule.requires)?;
+        let stdin = match &rule.stdin {
+            Some(t @ Target::Variable(..)) => targets.lookup(t),
+            _ => None,
+        };
+        Ok(Entry { rule, creates, requires, stdin })
+    }
+}
+
+pub(super) enum Kind {
+    Rule(Arc<Entry>),
+    Template(RuleTemplate),
+    Variable(String),
+}
+
+pub(super) struct Recipe {
+    pub(super) creates: Vec<TargetId>,
+    pub(super) requires: Vec<TargetId>,
+    pub(super) kind: Kind,
 }
 
 pub struct TaskDb {
@@ -602,7 +641,7 @@ pub struct TaskDb {
     pub targets: Targets,
     pub runners: HashMap<String, Runner>,
     pub force_run: bool,
-    rules: Vec<Entry>,
+    recipes: Vec<Recipe>,
     index: HashMap<TargetId, usize>,
     pub(super) history: Mutex<BTreeMap<PathBuf, String>>,
 }
@@ -614,39 +653,35 @@ impl TaskDb {
             targets: Targets::new(),
             runners: default_runners(),
             force_run: false,
-            rules: Vec::new(),
+            recipes: Vec::new(),
             index: HashMap::new(),
             history: Mutex::new(BTreeMap::new()),
         }
     }
 
     pub fn add(&mut self, rule: Rule) -> Result<(), RuleError> {
-        let rule = rule.complete()?;
-        let intern = |ts: &[Target]| ts.iter().map(|t| self.targets.intern(t)).collect::<Result<Vec<_>, _>>();
-        let creates = intern(&rule.creates)?;
-        let requires = intern(&rule.requires)?;
-        if let Some((t, _)) = rule.creates.iter().zip(&creates).find(|(_, id)| self.index.contains_key(id)) {
-            return Err(RuleError::Duplicate(t.clone()));
-        }
-        let stdin = match &rule.stdin {
-            Some(t @ Target::Variable(..)) => self.targets.lookup(t),
-            _ => None,
-        };
+        let entry = Entry::new(rule, &self.targets)?;
+        self.insert(Recipe { creates: entry.creates.clone(), requires: entry.requires.clone(), kind: Kind::Rule(Arc::new(entry)) })
+    }
 
-        let n = self.rules.len();
-        for id in &creates {
+    pub(super) fn insert(&mut self, recipe: Recipe) -> Result<(), RuleError> {
+        if let Some(id) = recipe.creates.iter().find(|id| self.index.contains_key(id)) {
+            return Err(RuleError::Duplicate(self.targets.get(*id)));
+        }
+        let n = self.recipes.len();
+        for id in &recipe.creates {
             self.index.insert(*id, n);
         }
-        self.rules.push(Entry { rule, creates, requires, stdin });
+        self.recipes.push(recipe);
         Ok(())
     }
 
-    pub(super) fn rule_for(&self, target: TargetId) -> Option<usize> {
+    pub(super) fn recipe_for(&self, target: TargetId) -> Option<usize> {
         self.index.get(&target).copied()
     }
 
-    pub(super) fn entry(&self, n: usize) -> &Entry {
-        &self.rules[n]
+    pub(super) fn recipe(&self, n: usize) -> &Recipe {
+        &self.recipes[n]
     }
 }
 ```
@@ -694,6 +729,174 @@ impl TaskDb {
         }
         tmp.persist(path)?;
         Ok(())
+    }
+}
+```
+
+Templates
+---------
+
+A rule in a Brei program is written with strings, which may contain variables: `${name}` is replaced with the value of the scalar variable `var(name)`. Additionally, `splice(name)` in `requires` is replaced with the elements of the list variable `listvar(name)`. Such a rule is a `RuleTemplate`, the Python `TaskProxy`. A template depends on the variables it uses. Once their values are known, it is expanded into a `Rule`, which then has its own dependencies.
+
+A template string uses the [dollar syntax](./template_strings.md#dollar-syntax). `$$` is a literal dollar sign, also in a template that doesn't use any variables, so every template is expanded, even if it has no variables. One that has no variables and doesn't splice anything is expanded right away, and added as a rule. Otherwise it is added as a recipe of its own.
+
+The targets of a template (`creates`, `stdout` and `name`) are fixed: we need to know which recipe creates a target before we can build it. Templates with variables in their targets are resolved in an earlier stage, when reading the program. List variables have their own place: `listvar(name)` can only be used as `stdout`, and `splice(name)` only in `requires`.
+
+```rust
+//| file: src/tasks/template.rs
+use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
+use crate::template_strings::{dollar, Env, Error, Format, Item};
+use super::db::{Kind, Recipe, TaskDb};
+use super::rule::{Failure, Rule, RuleError};
+use super::target::{wrapped, Target, VarType};
+
+#[derive(Clone, Debug, Default)]
+pub struct RuleTemplate {
+    pub creates: Vec<String>,
+    pub requires: Vec<String>,
+    pub name: Option<String>,
+    pub runner: Option<String>,
+    pub path: Option<String>,
+    pub script: Option<String>,
+    pub stdin: Option<String>,
+    pub stdout: Option<String>,
+    pub description: Option<String>,
+    pub force: bool,
+}
+
+/// The values of list variables, by name.
+pub(super) type Lists = HashMap<String, Vec<String>>;
+
+/// Names of the variables in a template string.
+pub(super) fn variables(s: &str) -> impl Iterator<Item=&str> {
+    dollar(s).filter_map(|item| match item {
+        Ok(Item::Variable(name)) => Some(name),
+        _ => None,
+    })
+}
+
+pub(super) fn substitute(s: &str, env: &Env) -> Result<String, Failure> {
+    dollar(s).format(env).map_err(|e| Failure::Template(match e {
+        Error::MissingVariable(name) => format!("variable `{name}` has no value"),
+        Error::InvalidTemplate(msg) => msg,
+    }))
+}
+
+fn splice_name(s: &str) -> Option<&str> {
+    wrapped(s, "splice")
+}
+
+fn parse(s: String) -> Result<Target, Failure> {
+    s.parse().map_err(|_| Failure::Template("empty target".into()))
+}
+
+impl RuleTemplate {
+    /// The targets: `creates`, `stdout` and the phony target `#name`.
+    fn targets(&self) -> Vec<String> {
+        self.creates.iter().cloned()
+            .chain(self.stdout.clone())
+            .chain(self.name.as_ref().map(|n| format!("#{n}")))
+            .collect()
+    }
+
+    fn strings(&self) -> impl Iterator<Item=&String> {
+        let fields = [&self.name, &self.runner, &self.path, &self.script, &self.stdin, &self.stdout, &self.description];
+        self.creates.iter().chain(&self.requires).chain(fields.into_iter().flatten())
+    }
+
+    /// Names of the variables used in the template.
+    pub fn variables(&self) -> BTreeSet<&str> {
+        self.strings().flat_map(|s| variables(s)).collect()
+    }
+
+    /// Names of the list variables spliced into `requires`.
+    pub fn splices(&self) -> BTreeSet<&str> {
+        self.requires.iter().filter_map(|s| splice_name(s)).collect()
+    }
+
+    fn check(&self) -> Result<(), RuleError> {
+        let invalid = |msg: String| Err(RuleError::Invalid(msg));
+        let targets = self.targets();
+        if let Some(t) = targets.iter().find(|t| variables(t).next().is_some()) {
+            return invalid(format!("the targets of a rule can't contain variables, found `{t}`"));
+        }
+        let inputs = || self.stdin.iter().chain(&self.path);
+        if let Some(s) = self.creates.iter().chain(&self.requires).chain(inputs()).find(|s| wrapped(s, "listvar").is_some()) {
+            return invalid(format!("`{s}` can only be used as `stdout` of a rule"));
+        }
+        if let Some(s) = targets.iter().chain(inputs()).find(|s| splice_name(s).is_some()) {
+            return invalid(format!("`{s}` can only be used in `requires`"));
+        }
+        Ok(())
+    }
+
+    /// Substitute variables and splice lists, giving a rule.
+    pub(super) fn expand(&self, env: &Env, lists: &Lists) -> Result<Rule, Failure> {
+        let sub = |s: &Option<String>| s.as_deref().map(|s| substitute(s, env)).transpose();
+        let target = |s: &str| parse(substitute(s, env)?);
+
+        let mut requires = Vec::new();
+        for s in &self.requires {
+            match splice_name(s) {
+                Some(name) => {
+                    let items = lists.get(name)
+                        .ok_or_else(|| Failure::Template(format!("list variable `{name}` has no value")))?;
+                    for item in items {
+                        requires.push(parse(item.clone())?);
+                    }
+                }
+                None => requires.push(target(s)?),
+            }
+        }
+
+        Ok(Rule {
+            creates: self.creates.iter().map(|s| target(s)).collect::<Result<_, _>>()?,
+            requires,
+            name: sub(&self.name)?,
+            runner: sub(&self.runner)?,
+            path: sub(&self.path)?.map(PathBuf::from),
+            script: sub(&self.script)?,
+            stdin: sub(&self.stdin)?.map(parse).transpose()?,
+            stdout: sub(&self.stdout)?.map(parse).transpose()?,
+            description: sub(&self.description)?,
+            force: self.force,
+        })
+    }
+}
+
+fn scalar(name: &str) -> Target {
+    Target::Variable(name.to_string(), VarType::Scalar)
+}
+
+impl TaskDb {
+    /// Add a rule that may use variables.
+    pub fn add_template(&mut self, template: RuleTemplate) -> Result<(), RuleError> {
+        template.check()?;
+        let invalid = |f: Failure| RuleError::Invalid(f.to_string());
+        let (vars, lists) = (template.variables(), template.splices());
+        if vars.is_empty() && lists.is_empty() {
+            let rule = template.expand(&Env::new(), &Lists::new()).map_err(invalid)?;
+            return self.add(rule);
+        }
+
+        let requires = vars.iter().map(|v| scalar(v))
+            .chain(lists.iter().map(|v| Target::Variable(v.to_string(), VarType::List)))
+            .map(|t| self.targets.intern(&t))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut creates = Vec::new();
+        for t in template.targets() {
+            let t = parse(substitute(&t, &Env::new()).map_err(invalid)?).map_err(invalid)?;
+            creates.push(self.targets.intern(&t)?);
+        }
+        self.insert(Recipe { creates, requires, kind: Kind::Template(template) })
+    }
+
+    /// Add a variable whose value is a template string.
+    pub fn add_variable(&mut self, name: &str, template: &str) -> Result<(), RuleError> {
+        let creates = vec![self.targets.intern(&scalar(name))?];
+        let requires = variables(template).map(|v| self.targets.intern(&scalar(v))).collect::<Result<Vec<_>, _>>()?;
+        self.insert(Recipe { creates, requires, kind: Kind::Variable(template.to_string()) })
     }
 }
 ```
@@ -925,11 +1128,12 @@ fn run_command(mut cmd: Command, display: &str, input: Option<&str>, cancel: &Ca
 Engine tasks
 ------------
 
-Now we can put rules on the engine. There are four kinds of jobs:
+Now we can put rules on the engine. There are five kinds of jobs:
 
-- `Build` a target, with the target as its key. This job is memoized, so every target is built at most once. If no rule creates the target, it should be a file that already exists. Otherwise, the result is a continuation: building each dependency, followed by running the rule;
+- `Build` a target, with the target as its key. This job is memoized, so every target is built at most once. If no recipe creates the target, it should be a file that already exists. Otherwise, the result is a continuation: building each dependency of the recipe, followed by running the rule, or expanding the template;
+- `Expand` a template or an environment variable, once the variables it uses are built. A variable gives its value right away. A template gives a rule, so the result is again a continuation: building the dependencies of that rule, followed by running it;
 - `Run` a rule, once its dependencies are built. This has a local key, and receives the values of all dependencies. The only value it uses is that of a variable on `stdin`;
-- `Alias` a target to another. A rule can create several targets, but we want to run it only once. So the first target is the main one: building any other target of the rule gives a continuation that builds the main target, followed by an alias that passes on its value;
+- `Alias` a target to another. A recipe can create several targets, but we want to use it only once. So the first target is the main one: building any other target of the recipe gives a continuation that builds the main target, followed by an alias that passes on its value;
 - `All` waits for several targets, so that we can build them in one go. Its value is `Nothing`.
 
 ```rust
@@ -938,13 +1142,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use crate::noodles::task::{Task, Response, Promise, CancelToken, Error, Worker};
 use crate::noodles::kernel::Kernel;
-use super::db::TaskDb;
+use crate::template_strings::Env;
+use super::db::{Entry, Kind, TaskDb};
 use super::rule::{Value, Failure};
 use super::target::{Target, TargetId, Key};
+use super::template::{substitute, Lists};
 
 pub enum Job {
     Build { db: Arc<TaskDb>, target: TargetId },
-    Run { db: Arc<TaskDb>, rule: usize, deps: Vec<TargetId>, args: HashMap<TargetId, Value> },
+    Expand { db: Arc<TaskDb>, recipe: usize, args: HashMap<TargetId, Value> },
+    Run { db: Arc<TaskDb>, entry: Arc<Entry>, args: HashMap<TargetId, Value> },
     Alias { target: TargetId, value: Option<Value> },
     All { targets: Vec<TargetId>, done: HashSet<TargetId> },
 }
@@ -955,28 +1162,65 @@ impl Job {
     }
 }
 
+/// Build the dependencies, then `last`.
+fn after(db: &Arc<TaskDb>, deps: &[TargetId], last: Job) -> Response<Job> {
+    let tasks = deps.iter().map(|dep| Job::build(db, *dep)).chain([last]);
+    Response::Continuation(Box::new(Promise::new(Key::Local(0), tasks)))
+}
+
 fn build_target(db: Arc<TaskDb>, target: TargetId) -> Response<Job> {
-    let Some(n) = db.rule_for(target) else {
+    let Some(n) = db.recipe_for(target) else {
         return match db.targets.get(target) {
             Target::Path(p) if db.root.join(&p).exists() => Response::Value(Value::Nothing),
             t => Response::Error(Failure::Missing(t)),
         };
     };
 
-    let entry = db.entry(n);
-    let main = entry.creates[0];
-    let tasks = if main != target {
-        vec![Job::build(&db, main), Job::Alias { target: main, value: None }]
-    } else {
-        let mut tasks: Vec<Job> = entry.requires.iter().map(|dep| Job::build(&db, *dep)).collect();
-        tasks.push(Job::Run { db: db.clone(), rule: n, deps: entry.requires.clone(), args: HashMap::new() });
-        tasks
+    let recipe = db.recipe(n);
+    let main = recipe.creates[0];
+    if main != target {
+        return after(&db, &[main], Job::Alias { target: main, value: None });
+    }
+    let last = match &recipe.kind {
+        Kind::Rule(entry) => Job::Run { db: db.clone(), entry: entry.clone(), args: HashMap::new() },
+        Kind::Template(_) | Kind::Variable(_) => Job::Expand { db: db.clone(), recipe: n, args: HashMap::new() },
     };
-    Response::Continuation(Box::new(Promise::new(Key::Local(0), tasks)))
+    after(&db, &recipe.requires, last)
 }
 
-fn run_rule(db: Arc<TaskDb>, n: usize, args: HashMap<TargetId, Value>, cancel: &CancelToken) -> Response<Job> {
-    let entry = db.entry(n);
+<<job-expand-run>>
+```
+
+To expand a template, we collect the values of the variables it uses. Variables that have no value (because the rule that creates them didn't need to run) are left out, so using them gives an error. The rule that comes out of a template is interned at run time; its dependencies may be new targets, for instance paths from a list variable.
+
+```rust
+//| id: job-expand-run
+fn expand(db: Arc<TaskDb>, n: usize, args: HashMap<TargetId, Value>) -> Response<Job> {
+    let mut env = Env::new();
+    let mut lists = Lists::new();
+    for (id, value) in args {
+        let Target::Variable(name, _) = db.targets.get(id) else { continue };
+        match value {
+            Value::Scalar(s) => { env.insert(name, s); }
+            Value::List(l) => { lists.insert(name, l); }
+            Value::Nothing => {}
+        }
+    }
+
+    let result = match &db.recipe(n).kind {
+        Kind::Variable(template) => substitute(template, &env).map(|s| Response::Value(Value::Scalar(s))),
+        Kind::Template(template) => template.expand(&env, &lists)
+            .and_then(|rule| Entry::new(rule, &db.targets).map_err(|e| Failure::Template(e.to_string())))
+            .map(|entry| {
+                let entry = Arc::new(entry);
+                after(&db, &entry.requires, Job::Run { db: db.clone(), entry: entry.clone(), args: HashMap::new() })
+            }),
+        Kind::Rule(_) => unreachable!("rules are not expanded"),
+    };
+    result.unwrap_or_else(Response::Error)
+}
+
+fn run_rule(db: Arc<TaskDb>, entry: Arc<Entry>, args: HashMap<TargetId, Value>, cancel: &CancelToken) -> Response<Job> {
     let input = entry.stdin.map(|id| match args.get(&id) {
         Some(Value::Scalar(s)) => s.as_str(),
         _ => "",
@@ -995,18 +1239,19 @@ impl Task for Job {
     fn key(&self) -> Key {
         match self {
             Job::Build { target, .. } => Key::Target(*target),
-            Job::Run { .. } | Job::Alias { .. } | Job::All { .. } => Key::Local(0),
+            Job::Expand { .. } | Job::Run { .. } | Job::Alias { .. } | Job::All { .. } => Key::Local(0),
         }
     }
 
     fn dependencies(&self) -> impl Iterator<Item=Key> {
-        let deps: Vec<Key> = match self {
+        let deps: Vec<TargetId> = match self {
             Job::Build { .. } => Vec::new(),
-            Job::Run { deps, .. } => deps.iter().map(|d| Key::Target(*d)).collect(),
-            Job::Alias { target, .. } => vec![Key::Target(*target)],
-            Job::All { targets, .. } => targets.iter().map(|t| Key::Target(*t)).collect(),
+            Job::Expand { db, recipe, .. } => db.recipe(*recipe).requires.clone(),
+            Job::Run { entry, .. } => entry.requires.clone(),
+            Job::Alias { target, .. } => vec![*target],
+            Job::All { targets, .. } => targets.clone(),
         };
-        deps.into_iter()
+        deps.into_iter().map(Key::Target)
     }
 
     fn memoize(&self) -> bool {
@@ -1016,7 +1261,8 @@ impl Task for Job {
     fn run(self, cancel: &CancelToken) -> Response<Self> {
         match self {
             Job::Build { db, target } => build_target(db, target),
-            Job::Run { db, rule, args, .. } => run_rule(db, rule, args, cancel),
+            Job::Expand { db, recipe, args } => expand(db, recipe, args),
+            Job::Run { db, entry, args } => run_rule(db, entry, args, cancel),
             Job::Alias { value, .. } => Response::Value(value.expect("alias is ready")),
             Job::All { .. } => Response::Value(Value::Nothing),
         }
@@ -1024,7 +1270,7 @@ impl Task for Job {
 
     fn assoc(&mut self, key: Key, value: Value) {
         match (self, key) {
-            (Job::Run { args, .. }, Key::Target(id)) => { args.insert(id, value); }
+            (Job::Expand { args, .. } | Job::Run { args, .. }, Key::Target(id)) => { args.insert(id, value); }
             (Job::Alias { value: v, .. }, _) => *v = Some(value),
             (Job::All { done, .. }, Key::Target(id)) => { done.insert(id); }
             _ => {}
@@ -1034,7 +1280,8 @@ impl Task for Job {
     fn ready(&self) -> bool {
         match self {
             Job::Build { .. } => true,
-            Job::Run { deps, args, .. } => args.len() == deps.len(),
+            Job::Expand { db, recipe, args } => args.len() == db.recipe(*recipe).requires.len(),
+            Job::Run { entry, args, .. } => args.len() == entry.requires.len(),
             Job::Alias { value, .. } => value.is_some(),
             Job::All { targets, done } => done.len() == targets.len(),
         }
@@ -1344,5 +1591,113 @@ fn build_several() {
     let result = build_all(&db, &mut Kernel::new().keep_going(), &SingleWorker::new(), &ids(&["x.txt", "b.txt", "c.txt"]));
     assert_eq!(failures(result.map(|_| Value::Nothing)), [Failure::Command { command: "false".into(), code: Some(1) }]);
     assert!(dir.path().join("b.txt").exists() && dir.path().join("c.txt").exists());
+}
+```
+
+### Templates
+
+A variable from the environment is a template string, which may use other variables. Templates use variables in any field, and are expanded when they run.
+
+```rust
+//| id: task-tests
+fn template(creates: &[&str], requires: &[&str], script: &str) -> RuleTemplate {
+    let strings = |ts: &[&str]| ts.iter().map(|t| t.to_string()).collect();
+    RuleTemplate { creates: strings(creates), requires: strings(requires), script: Some(script.into()), ..Default::default() }
+}
+
+#[test]
+fn environment() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join("data")).unwrap();
+    fs::write(dir.path().join("data/input.txt"), "hello").unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add_variable("dir", "data").unwrap();
+    db.add_variable("input", "${dir}/input.txt").unwrap();
+    db.add(Rule { stdout: Some(target("var(output)")), ..rule(&[], &[], "echo output.txt") }).unwrap();
+    db.add_template(template(&["output.txt"], &["${input}"], "cp ${input} ${output}")).unwrap();
+    let db = Arc::new(db);
+
+    assert_eq!(run(&db, "var(input)").unwrap(), Value::Scalar("data/input.txt".into()));
+    run(&db, "output.txt").unwrap();
+    assert_eq!(read(&dir, "output.txt"), "hello");
+}
+```
+
+The output of a template rule can go to a variable, and the values of variables are substituted in `stdin` too. A literal dollar sign is written `$$`, also in a rule without variables, and a dollar sign that doesn't start a variable stays as it is.
+
+```rust
+//| id: task-tests
+#[test]
+fn template_variables() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add_variable("name", "greeting").unwrap();
+    db.add(Rule { stdout: Some(target("var(greeting)")), ..rule(&[], &[], "echo hello") }).unwrap();
+    db.add_template(RuleTemplate {
+        stdin: Some("var(${name})".into()), stdout: Some("var(shout)".into()), ..template(&[], &[], "tr a-z A-Z")
+    }).unwrap();
+    db.add_template(RuleTemplate { stdout: Some("var(dollars)".into()), ..template(&[], &[], "echo $$1 $1 $(x)") }).unwrap();
+    let db = Arc::new(db);
+
+    assert_eq!(run(&db, "var(shout)").unwrap(), Value::Scalar("HELLO".into()));
+    assert_eq!(run(&db, "var(dollars)").unwrap(), Value::Scalar("$1 $1 $(x)".into()));
+}
+```
+
+Splicing a list variable into `requires` makes all its elements dependencies. These targets are only known at run time.
+
+```rust
+//| id: task-tests
+#[test]
+fn splice() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("c.txt"), "c\n").unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add(Rule { stdout: Some(target("listvar(files)")), ..rule(&[], &[], r"printf 'a.txt\nb.txt\nc.txt\n'") }).unwrap();
+    db.add(bash(&["a.txt"], &[], "echo a > a.txt")).unwrap();
+    db.add(bash(&["b.txt"], &[], "echo b > b.txt")).unwrap();
+    db.add_template(RuleTemplate {
+        runner: Some("bash".into()),
+        ..template(&["all.txt"], &["splice(files)"], "cat a.txt b.txt c.txt > all.txt")
+    }).unwrap();
+    db.add_template(template(&["d.txt"], &["splice(files)", "nothere.txt"], "touch d.txt")).unwrap();
+    let db = Arc::new(db);
+
+    run(&db, "all.txt").unwrap();
+    assert_eq!(read(&dir, "all.txt"), "a\nb\nc\n");
+    assert_eq!(failures(run(&db, "d.txt")), [Failure::Missing(target("nothere.txt"))]);
+}
+```
+
+Templates fail when the variables they use are missing. Mistakes are found when a template is added, where possible: variables in targets, list variables in the wrong places, or a variable that is used both as a scalar and as a list.
+
+```rust
+//| id: task-tests
+#[test]
+fn invalid_templates() {
+    let dir = TempDir::new().unwrap();
+    let mut db = TaskDb::new(dir.path());
+    db.add_template(template(&["a.txt"], &[], "touch ${unknown}")).unwrap();
+    db.add_variable("x", "${y}").unwrap();
+    assert_eq!(db.add_variable("x", "1"), Err(RuleError::Duplicate(target("var(x)"))));
+    db.add(Rule { stdout: Some(target("listvar(list)")), ..rule(&[], &[], "true") }).unwrap();
+    assert!(matches!(db.add_template(template(&["b.txt"], &[], "echo ${list}")), Err(RuleError::TypeMismatch(_))));
+    assert!(matches!(db.add_template(template(&["b.txt"], &["splice(x)"], "true")), Err(RuleError::TypeMismatch(_))));
+
+    let invalid = [
+        template(&["${x}.txt"], &[], "true"),
+        RuleTemplate { name: Some("${x}".into()), ..template(&[], &[], "true") },
+        template(&["c.txt"], &["listvar(list)"], "true"),
+        template(&["listvar(list)"], &[], "true"),
+        template(&["splice(list)"], &[], "true"),
+        RuleTemplate { stdin: Some("splice(list)".into()), ..template(&["c.txt"], &[], "cat") },
+    ];
+    for t in invalid {
+        assert!(matches!(db.add_template(t), Err(RuleError::Invalid(_))));
+    }
+
+    let db = Arc::new(db);
+    assert_eq!(failures(run(&db, "a.txt")), [Failure::Missing(target("var(unknown)"))]);
+    assert_eq!(failures(run(&db, "var(x)")), [Failure::Missing(target("var(y)"))]);
 }
 ```
