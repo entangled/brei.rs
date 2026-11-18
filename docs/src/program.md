@@ -365,7 +365,8 @@ fn resolve(&mut self, program: Program) -> Result<(), ProgramError> {
             .map_err(|e| ProgramError::Rule(format!("environment variable `{name}`"), e))?;
     }
     for (name, runner) in program.runner {
-        self.db.add_runner(&name, runner);
+        self.db.add_runner(&name, runner)
+            .map_err(|e| ProgramError::Rule(format!("runner `{name}`"), e))?;
     }
     self.templates.extend(program.template);
 

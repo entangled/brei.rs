@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use super::rule::{Rule, RuleError, Runner, default_runners};
 use super::target::{Target, TargetId, Targets};
-use super::template::RuleTemplate;
+use super::template::{variables, RuleTemplate};
 
 pub struct Entry {
     pub(super) rule: Rule,
@@ -86,8 +86,13 @@ impl TaskDb {
         self.targets.lookup(target).and_then(|id| self.recipe_for(id)).is_some()
     }
 
-    pub fn add_runner(&self, name: &str, runner: Runner) {
+    /// Add a runner. Its arguments can only use the variable `script`.
+    pub fn add_runner(&self, name: &str, runner: Runner) -> Result<(), RuleError> {
+        if let Some(var) = runner.args.iter().flat_map(|arg| variables(arg)).find(|v| *v != "script") {
+            return Err(RuleError::Invalid(format!("its arguments use `${{{var}}}`, but only `${{script}}` can be used")));
+        }
         self.runners.write().unwrap().insert(name.to_string(), runner);
+        Ok(())
     }
 
     pub fn runner(&self, name: &str) -> Option<Runner> {

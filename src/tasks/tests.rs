@@ -225,6 +225,16 @@ fn invalid_rules() {
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[9]
 #[test]
+fn runner_arguments() {
+    let db = TaskDb::new(".");
+    let runner = |args: &[&str]| Runner { command: "lua".into(), args: args.iter().map(|a| a.to_string()).collect() };
+    db.add_runner("lua", runner(&["-W", "${script}"])).unwrap();
+    assert_eq!(db.add_runner("lua", runner(&["${script}", "${other}"])),
+        Err(RuleError::Invalid("its arguments use `${other}`, but only `${script}` can be used".into())));
+}
+// ~/~ end
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[10]
+#[test]
 fn persistent_history() {
     let dir = TempDir::new().unwrap();
     let rules = |script: &str| {
@@ -259,7 +269,7 @@ fn persistent_history() {
     assert!(TaskDb::new(dir.path()).load_history(HISTORY_FILE).is_err());
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[10]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[11]
 #[test]
 fn build_several() {
     let dir = TempDir::new().unwrap();
@@ -283,7 +293,7 @@ fn build_several() {
     assert!(dir.path().join("b.txt").exists() && dir.path().join("c.txt").exists());
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[11]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[12]
 fn template(creates: &[&str], requires: &[&str], script: &str) -> RuleTemplate {
     let strings = |ts: &[&str]| ts.iter().map(|t| t.to_string()).collect();
     RuleTemplate { creates: strings(creates), requires: strings(requires), script: Some(script.into()), ..Default::default() }
@@ -306,7 +316,7 @@ fn environment() {
     assert_eq!(read(&dir, "output.txt"), "hello");
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[12]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[13]
 #[test]
 fn template_variables() {
     let dir = TempDir::new().unwrap();
@@ -323,7 +333,7 @@ fn template_variables() {
     assert_eq!(run(&db, "var(dollars)").unwrap(), Value::Scalar("$1 $1 $(x)".into()));
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[13]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[14]
 #[test]
 fn splice() {
     let dir = TempDir::new().unwrap();
@@ -344,7 +354,7 @@ fn splice() {
     assert_eq!(failures(run(&db, "d.txt")), [Failure::Missing(target("nothere.txt"))]);
 }
 // ~/~ end
-// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[14]
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[15]
 #[test]
 fn invalid_templates() {
     let dir = TempDir::new().unwrap();

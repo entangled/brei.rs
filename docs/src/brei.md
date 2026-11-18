@@ -465,7 +465,7 @@ impl fmt::Display for Failure {
 
 ### Runners
 
-A runner is a command that runs a script. Its arguments are template strings, where `${script}` is replaced with the path of the script. Brei comes with runners for Python and Bash; a program can add more.
+A runner is a command that runs a script. Its arguments are template strings, where `${script}` is replaced with the path of the script. That is the only variable they can use: other variables are an error, which is found when the runner is added. Brei comes with runners for Python and Bash; a program can add more.
 
 ```rust
 //| id: rule-runner
@@ -625,7 +625,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use super::rule::{Rule, RuleError, Runner, default_runners};
 use super::target::{Target, TargetId, Targets};
-use super::template::RuleTemplate;
+use super::template::{variables, RuleTemplate};
 
 pub struct Entry {
     pub(super) rule: Rule,
@@ -707,8 +707,13 @@ impl TaskDb {
         self.targets.lookup(target).and_then(|id| self.recipe_for(id)).is_some()
     }
 
-    pub fn add_runner(&self, name: &str, runner: Runner) {
+    /// Add a runner. Its arguments can only use the variable `script`.
+    pub fn add_runner(&self, name: &str, runner: Runner) -> Result<(), RuleError> {
+        if let Some(var) = runner.args.iter().flat_map(|arg| variables(arg)).find(|v| *v != "script") {
+            return Err(RuleError::Invalid(format!("its arguments use `${{{var}}}`, but only `${{script}}` can be used")));
+        }
         self.runners.write().unwrap().insert(name.to_string(), runner);
+        Ok(())
     }
 
     pub fn runner(&self, name: &str) -> Option<Runner> {
@@ -1016,11 +1021,12 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 use tempfile::{NamedTempFile, TempPath};
 use crate::noodles::task::CancelToken;
-use crate::template_strings::{dollar, Env, Format};
+use crate::template_strings::Env;
 use super::db::TaskDb;
 use super::group;
 use super::rule::{Rule, Value, Failure};
 use super::target::{Target, VarType};
+use super::template::substitute;
 
 impl TaskDb {
     fn modified(&self, path: &Path) -> Result<SystemTime, Failure> {
@@ -1099,7 +1105,7 @@ fn commands(&self, rule: &Rule, script_file: &mut Option<TempPath>) -> Result<Ve
     let mut env = Env::new();
     env.insert("script".into(), path.to_string_lossy().into_owned());
     let args = runner.args.iter()
-        .map(|arg| dollar(arg.as_str()).format(&env).map_err(|e| Failure::Template(format!("{e:?}"))))
+        .map(|arg| substitute(arg, &env))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(vec![std::iter::once(runner.command.clone()).chain(args).collect()])
 }
@@ -1768,6 +1774,20 @@ fn invalid_rules() {
     for r in invalid {
         assert!(matches!(db.add(r), Err(RuleError::Invalid(_))));
     }
+}
+```
+
+Runners can only use `${script}` in their arguments.
+
+```rust
+//| id: task-tests
+#[test]
+fn runner_arguments() {
+    let db = TaskDb::new(".");
+    let runner = |args: &[&str]| Runner { command: "lua".into(), args: args.iter().map(|a| a.to_string()).collect() };
+    db.add_runner("lua", runner(&["-W", "${script}"])).unwrap();
+    assert_eq!(db.add_runner("lua", runner(&["${script}", "${other}"])),
+        Err(RuleError::Invalid("its arguments use `${other}`, but only `${script}` can be used".into())));
 }
 ```
 

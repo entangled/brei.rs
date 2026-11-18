@@ -203,7 +203,7 @@ A runner is a command that runs a script file.
 | Key       | Type            | Meaning |
 |-----------|-----------------|---------|
 | `command` | string          | The program to run. |
-| `args`    | list of strings | Its arguments. `${script}` is the path of the script file; no other variables can be used. |
+| `args`    | list of strings | Its arguments. `${script}` is the path of the script file. Other variables are an error. |
 
 Brei comes with two runners, `bash` and `python`, both called with `${script}` as their only argument. A runner with the same name replaces it. `brei --list-runners` shows them.
 

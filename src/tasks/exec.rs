@@ -7,11 +7,12 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 use tempfile::{NamedTempFile, TempPath};
 use crate::noodles::task::CancelToken;
-use crate::template_strings::{dollar, Env, Format};
+use crate::template_strings::Env;
 use super::db::TaskDb;
 use super::group;
 use super::rule::{Rule, Value, Failure};
 use super::target::{Target, VarType};
+use super::template::substitute;
 
 impl TaskDb {
     fn modified(&self, path: &Path) -> Result<SystemTime, Failure> {
@@ -78,7 +79,7 @@ impl TaskDb {
         let mut env = Env::new();
         env.insert("script".into(), path.to_string_lossy().into_owned());
         let args = runner.args.iter()
-            .map(|arg| dollar(arg.as_str()).format(&env).map_err(|e| Failure::Template(format!("{e:?}"))))
+            .map(|arg| substitute(arg, &env))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(vec![std::iter::once(runner.command.clone()).chain(args).collect()])
     }
