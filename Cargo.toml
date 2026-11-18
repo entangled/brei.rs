@@ -27,3 +27,8 @@ toml = "0.8.19"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.191"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
