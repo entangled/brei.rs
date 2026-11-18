@@ -26,8 +26,24 @@ pub(super) fn wrapped<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn normalize(path: &Path) -> PathBuf {
-    let normal: PathBuf = path.components().filter(|c| *c != Component::CurDir).collect();
-    if normal.as_os_str().is_empty() { PathBuf::from(".") } else { normal }
+    let mut normal = String::new();
+    let mut separate = false;
+    for component in path.components() {
+        let part = component.as_os_str().to_string_lossy();
+        match component {
+            Component::CurDir => continue,
+            Component::Prefix(_) => normal.push_str(&part),
+            Component::RootDir => normal.push('/'),
+            Component::ParentDir | Component::Normal(_) => {
+                if separate {
+                    normal.push('/');
+                }
+                normal.push_str(&part);
+            }
+        }
+        separate = matches!(component, Component::ParentDir | Component::Normal(_));
+    }
+    if normal.is_empty() { PathBuf::from(".") } else { PathBuf::from(normal) }
 }
 
 impl Target {

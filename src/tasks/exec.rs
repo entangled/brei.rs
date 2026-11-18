@@ -1,4 +1,5 @@
 // ~/~ begin <<docs/src/brei.md#brei::src/tasks/exec.rs>>[init]
+use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -110,7 +111,12 @@ impl TaskDb {
 
         let mut output = Vec::new();
         for command in &commands {
-            let mut cmd = Command::new(&command[0]);
+            let display = command.join(" ");
+            let Some(program) = find_program(&command[0]) else {
+                self.forget(rule);
+                return Err(Failure::Io(format!("can't run `{display}`: command not found")));
+            };
+            let mut cmd = Command::new(program);
             cmd.args(&command[1..]).current_dir(&self.root).stderr(Stdio::piped());
             cmd.stdin(match &stdin {
                 Some(file) => Stdio::from(file.try_clone()?),
@@ -121,7 +127,6 @@ impl TaskDb {
                 Some(file) => Stdio::from(file.try_clone()?),
                 None => Stdio::piped(),
             });
-            let display = command.join(" ");
             log::debug!("{note}: running `{display}`");
             match run_command(cmd, &display, input, capture, &note, cancel) {
                 Ok(out) => output.extend(out),
@@ -149,6 +154,35 @@ impl TaskDb {
     // ~/~ end
 }
 
+// ~/~ begin <<docs/src/brei.md#brei::exec-find-program>>[init]
+fn find_program(name: &str) -> Option<PathBuf> {
+    if name.contains(['/', '\\']) {
+        return Some(PathBuf::from(name));
+    }
+    let mut extensions = vec![String::new()];
+    if cfg!(windows) {
+        let pathext = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        if Path::new(name).extension().is_none() {
+            extensions.clear();
+        }
+        extensions.extend(pathext.split(';').filter(|e| !e.is_empty()).map(str::to_lowercase));
+    }
+    env::split_paths(&env::var_os("PATH")?)
+        .flat_map(|dir| extensions.iter().map(move |ext| dir.join(format!("{name}{ext}"))))
+        .find(|path| is_executable(path))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+// ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::exec-run-command>>[init]
 fn forward(stream: impl Read + Send + 'static, note: &str) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
     let note = note.to_string();

@@ -89,7 +89,7 @@ mod tests {
 
 Targets are written as strings in a Brei program. A string that doesn't look like any of the other kinds is a path. Variable names can't contain white space or parentheses.
 
-Paths are normalized a little bit, so that `./data.csv` and `data.csv` are the same target. We only remove `.` components; `..` is left alone, since `a/../b` is not the same as `b` when `a` is a symbolic link.
+Paths are normalized a little bit, so that `./data.csv` and `data.csv` are the same target. We only remove `.` components; `..` is left alone, since `a/../b` is not the same as `b` when `a` is a symbolic link. The separator is always `/`, also on Windows (which accepts both), so that targets, and the history, look the same on every platform.
 
 ```rust
 //| id: target-parse
@@ -100,8 +100,24 @@ pub(super) fn wrapped<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn normalize(path: &Path) -> PathBuf {
-    let normal: PathBuf = path.components().filter(|c| *c != Component::CurDir).collect();
-    if normal.as_os_str().is_empty() { PathBuf::from(".") } else { normal }
+    let mut normal = String::new();
+    let mut separate = false;
+    for component in path.components() {
+        let part = component.as_os_str().to_string_lossy();
+        match component {
+            Component::CurDir => continue,
+            Component::Prefix(_) => normal.push_str(&part),
+            Component::RootDir => normal.push('/'),
+            Component::ParentDir | Component::Normal(_) => {
+                if separate {
+                    normal.push('/');
+                }
+                normal.push_str(&part);
+            }
+        }
+        separate = matches!(component, Component::ParentDir | Component::Normal(_));
+    }
+    if normal.is_empty() { PathBuf::from(".") } else { PathBuf::from(normal) }
 }
 
 impl Target {
@@ -1022,6 +1038,7 @@ A rule needs to run when one of its target files is missing, is older than one o
 
 ```rust
 //| file: src/tasks/exec.rs
+use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1078,6 +1095,7 @@ impl TaskDb {
     <<exec-execute>>
 }
 
+<<exec-find-program>>
 <<exec-run-command>>
 ```
 
@@ -1157,7 +1175,12 @@ pub(super) fn execute(&self, rule: &Rule, input: Option<&str>, cancel: &CancelTo
 
     let mut output = Vec::new();
     for command in &commands {
-        let mut cmd = Command::new(&command[0]);
+        let display = command.join(" ");
+        let Some(program) = find_program(&command[0]) else {
+            self.forget(rule);
+            return Err(Failure::Io(format!("can't run `{display}`: command not found")));
+        };
+        let mut cmd = Command::new(program);
         cmd.args(&command[1..]).current_dir(&self.root).stderr(Stdio::piped());
         cmd.stdin(match &stdin {
             Some(file) => Stdio::from(file.try_clone()?),
@@ -1168,7 +1191,6 @@ pub(super) fn execute(&self, rule: &Rule, input: Option<&str>, cancel: &CancelTo
             Some(file) => Stdio::from(file.try_clone()?),
             None => Stdio::piped(),
         });
-        let display = command.join(" ");
         log::debug!("{note}: running `{display}`");
         match run_command(cmd, &display, input, capture, &note, cancel) {
             Ok(out) => output.extend(out),
@@ -1192,6 +1214,41 @@ pub(super) fn execute(&self, rule: &Rule, input: Option<&str>, cancel: &CancelTo
         Some(Target::Variable(_, VarType::Scalar)) => Value::Scalar(text.trim().to_string()),
         _ => Value::Nothing,
     })
+}
+```
+
+### Finding a program
+
+A command is looked up on the `PATH`, the way a shell does it, before it runs. `Command` can do this by itself, but on Windows it looks in the system directories first. There, `bash.exe` starts the Windows Subsystem for Linux, while the user means the `bash` on their path, for instance from Git for Windows. On Windows, a program can leave out its extension: we try those in `PATHEXT`. A command with a directory in it is used as it is.
+
+```rust
+//| id: exec-find-program
+fn find_program(name: &str) -> Option<PathBuf> {
+    if name.contains(['/', '\\']) {
+        return Some(PathBuf::from(name));
+    }
+    let mut extensions = vec![String::new()];
+    if cfg!(windows) {
+        let pathext = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        if Path::new(name).extension().is_none() {
+            extensions.clear();
+        }
+        extensions.extend(pathext.split(';').filter(|e| !e.is_empty()).map(str::to_lowercase));
+    }
+    env::split_paths(&env::var_os("PATH")?)
+        .flat_map(|dir| extensions.iter().map(move |ext| dir.join(format!("{name}{ext}"))))
+        .find(|path| is_executable(path))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 ```
 
@@ -1708,7 +1765,7 @@ fn failing_rules() {
     assert_eq!(failures(run(&db, "y.txt")), [in_rule("creating `y.txt`", Failure::NotAchieved(targets(&["y.txt"])))]);
     let z = failures(run(&db, "z.txt"));
     assert!(matches!(&z[..], [Failure::Rule(_, f)] if matches!(&**f, Failure::Io(msg) if msg.contains("no-such-command"))));
-    assert_eq!(z[0].to_string(), "creating `z.txt`: can't run `no-such-command`: No such file or directory (os error 2)");
+    assert_eq!(z[0].to_string(), "creating `z.txt`: can't run `no-such-command`: command not found");
 }
 ```
 

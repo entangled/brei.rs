@@ -158,7 +158,7 @@ fn failing_rules() {
     assert_eq!(failures(run(&db, "y.txt")), [in_rule("creating `y.txt`", Failure::NotAchieved(targets(&["y.txt"])))]);
     let z = failures(run(&db, "z.txt"));
     assert!(matches!(&z[..], [Failure::Rule(_, f)] if matches!(&**f, Failure::Io(msg) if msg.contains("no-such-command"))));
-    assert_eq!(z[0].to_string(), "creating `z.txt`: can't run `no-such-command`: No such file or directory (os error 2)");
+    assert_eq!(z[0].to_string(), "creating `z.txt`: can't run `no-such-command`: command not found");
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::task-tests>>[6]

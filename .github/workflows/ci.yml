@@ -48,7 +48,7 @@ jobs:
         run: brew install lua
 
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --no-fail-fast
 
       - name: Clippy
         run: cargo clippy --locked --all-targets

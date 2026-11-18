@@ -99,7 +99,7 @@ A task runs a script to create its targets from its dependencies. All keys are o
 
 ### Scripts
 
-Without a runner, every non-empty line of `script` is a command. A line is split into arguments like a Unix shell would (with quotes and backslashes), but it doesn't go through a shell: there are no pipes, redirections or shell variables. Commands run in the directory `brei` runs in.
+Without a runner, every non-empty line of `script` is a command. A line is split into arguments like a Unix shell would (with quotes and backslashes), but it doesn't go through a shell: there are no pipes, redirections or shell variables. Programs are looked up on the `PATH`, like a shell does, and commands run in the directory `brei` runs in.
 
 With a runner, the script is written to a temporary file, and the runner runs that file. A task with neither `script` nor `path` doesn't run anything; it only waits for its dependencies, which is useful with `name`.
 
