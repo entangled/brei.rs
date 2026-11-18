@@ -1,5 +1,5 @@
 // ~/~ begin <<docs/src/brei.md#brei::src/tasks/db.rs>>[init]
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use super::rule::{Rule, RuleError, Runner, default_runners};
@@ -19,7 +19,7 @@ pub struct TaskDb {
     pub force_run: bool,
     rules: Vec<Entry>,
     index: HashMap<TargetId, usize>,
-    pub(super) history: Mutex<HashMap<PathBuf, String>>,
+    pub(super) history: Mutex<BTreeMap<PathBuf, String>>,
 }
 
 impl TaskDb {
@@ -31,7 +31,7 @@ impl TaskDb {
             force_run: false,
             rules: Vec::new(),
             index: HashMap::new(),
-            history: Mutex::new(HashMap::new()),
+            history: Mutex::new(BTreeMap::new()),
         }
     }
 

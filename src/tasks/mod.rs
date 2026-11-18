@@ -4,6 +4,7 @@
 mod target;
 mod rule;
 mod db;
+mod history;
 mod exec;
 mod job;
 
@@ -13,5 +14,6 @@ mod tests;
 pub use target::{Target, VarType, TargetId, Targets, Key, EmptyTarget, TypeMismatch};
 pub use rule::{Rule, RuleError, Runner, Value, Failure, default_runners};
 pub use db::TaskDb;
+pub use history::HISTORY_FILE;
 pub use job::{Job, build};
 // ~/~ end

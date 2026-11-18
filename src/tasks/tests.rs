@@ -182,4 +182,40 @@ fn invalid_rules() {
     }
 }
 // ~/~ end
+// ~/~ begin <<docs/src/brei.md#brei::task-tests>>[7]
+#[test]
+fn persistent_history() {
+    let dir = TempDir::new().unwrap();
+    let rules = |script: &str| {
+        let mut db = TaskDb::new(dir.path());
+        db.add(bash(&["a.txt"], &[], &format!("echo {script} >> log.txt; echo {script} > a.txt"))).unwrap();
+        db.add(bash(&["b.txt"], &[], "echo b >> log.txt; [ -e ok ] && touch b.txt")).unwrap();
+        db.load_history(HISTORY_FILE).unwrap();
+        Arc::new(db)
+    };
+
+    let db = rules("a");
+    run(&db, "a.txt").unwrap();
+    assert!(run(&db, "b.txt").is_err());
+    db.save_history(HISTORY_FILE).unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\nb\n");
+
+    // `a.txt` is up to date, `b.txt` failed so it runs again.
+    fs::write(dir.path().join("ok"), "").unwrap();
+    let db = rules("a");
+    run(&db, "a.txt").unwrap();
+    run(&db, "b.txt").unwrap();
+    db.save_history(HISTORY_FILE).unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\nb\nb\n");
+
+    // a different script for `a.txt`
+    let db = rules("A");
+    run(&db, "a.txt").unwrap();
+    run(&db, "b.txt").unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\nb\nb\nA\n");
+
+    fs::write(dir.path().join(HISTORY_FILE), "not json").unwrap();
+    assert!(TaskDb::new(dir.path()).load_history(HISTORY_FILE).is_err());
+}
+// ~/~ end
 // ~/~ end

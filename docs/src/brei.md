@@ -16,6 +16,7 @@ This chapter builds Brei on top of the [engine](./engine.md): the tasks that Bre
 mod target;
 mod rule;
 mod db;
+mod history;
 mod exec;
 mod job;
 
@@ -25,6 +26,7 @@ mod tests;
 pub use target::{Target, VarType, TargetId, Targets, Key, EmptyTarget, TypeMismatch};
 pub use rule::{Rule, RuleError, Runner, Value, Failure, default_runners};
 pub use db::TaskDb;
+pub use history::HISTORY_FILE;
 pub use job::{Job, build};
 ```
 
@@ -576,13 +578,13 @@ The task database
 
 The task database holds everything the tasks share while running: the table of targets, the rules, and which rule creates which target. Commands run in the `root` directory, and paths are relative to it.
 
-The history remembers the digest of the rule that last created each file. It is shared by all tasks, which may run on different threads, so it is behind a `Mutex`. Reading and writing the history to disk comes later.
+The history remembers the digest of the rule that last created each file. It is shared by all tasks, which may run on different threads, so it is behind a `Mutex`. It is a `BTreeMap`, so that it is written to disk in a stable order.
 
 Rules are added before running anything, so adding takes a `&mut` reference; once all rules are in, the database goes into an `Arc` and is shared with the tasks. A target can only be created by one rule.
 
 ```rust
 //| file: src/tasks/db.rs
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use super::rule::{Rule, RuleError, Runner, default_runners};
@@ -602,7 +604,7 @@ pub struct TaskDb {
     pub force_run: bool,
     rules: Vec<Entry>,
     index: HashMap<TargetId, usize>,
-    pub(super) history: Mutex<HashMap<PathBuf, String>>,
+    pub(super) history: Mutex<BTreeMap<PathBuf, String>>,
 }
 
 impl TaskDb {
@@ -614,7 +616,7 @@ impl TaskDb {
             force_run: false,
             rules: Vec::new(),
             index: HashMap::new(),
-            history: Mutex::new(HashMap::new()),
+            history: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -645,6 +647,53 @@ impl TaskDb {
 
     pub(super) fn entry(&self, n: usize) -> &Entry {
         &self.rules[n]
+    }
+}
+```
+
+### Persistent history
+
+The history is kept between runs in a JSON file, by default `.brei_history` in the root directory, that maps each path to its digest. A missing file is an empty history. Loading adds to the history in memory, so that loading twice does no harm.
+
+The history should be saved after every run, also when the run failed: targets of failed rules have been forgotten, so they are built again next time, while the rules that did succeed don't need to. We write to a temporary file first and then rename it, so an interrupted write can't leave a broken history behind.
+
+```rust
+//| file: src/tasks/history.rs
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
+use super::db::TaskDb;
+
+pub const HISTORY_FILE: &str = ".brei_history";
+
+impl TaskDb {
+    /// Read the history from a file, relative to the root.
+    pub fn load_history(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        let file = match File::open(self.root.join(path)) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let data: BTreeMap<PathBuf, String> = serde_json::from_reader(BufReader::new(file))?;
+        self.history.lock().unwrap().extend(data);
+        Ok(())
+    }
+
+    /// Write the history to a file, relative to the root.
+    pub fn save_history(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        let path = self.root.join(path);
+        let dir = path.parent().unwrap_or(&self.root);
+        let mut tmp = NamedTempFile::new_in(dir)?;
+        {
+            let mut out = BufWriter::new(tmp.as_file_mut());
+            serde_json::to_writer_pretty(&mut out, &*self.history.lock().unwrap())?;
+            writeln!(out)?;
+            out.flush()?;
+        }
+        tmp.persist(path)?;
+        Ok(())
     }
 }
 ```
@@ -1210,5 +1259,46 @@ fn invalid_rules() {
     for r in invalid {
         assert!(matches!(db.add(r), Err(RuleError::Invalid(_))));
     }
+}
+```
+
+
+The history carries over to a new database, through the history file. A rule whose script changed runs again, and so does a rule that failed last time.
+
+```rust
+//| id: task-tests
+#[test]
+fn persistent_history() {
+    let dir = TempDir::new().unwrap();
+    let rules = |script: &str| {
+        let mut db = TaskDb::new(dir.path());
+        db.add(bash(&["a.txt"], &[], &format!("echo {script} >> log.txt; echo {script} > a.txt"))).unwrap();
+        db.add(bash(&["b.txt"], &[], "echo b >> log.txt; [ -e ok ] && touch b.txt")).unwrap();
+        db.load_history(HISTORY_FILE).unwrap();
+        Arc::new(db)
+    };
+
+    let db = rules("a");
+    run(&db, "a.txt").unwrap();
+    assert!(run(&db, "b.txt").is_err());
+    db.save_history(HISTORY_FILE).unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\nb\n");
+
+    // `a.txt` is up to date, `b.txt` failed so it runs again.
+    fs::write(dir.path().join("ok"), "").unwrap();
+    let db = rules("a");
+    run(&db, "a.txt").unwrap();
+    run(&db, "b.txt").unwrap();
+    db.save_history(HISTORY_FILE).unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\nb\nb\n");
+
+    // a different script for `a.txt`
+    let db = rules("A");
+    run(&db, "a.txt").unwrap();
+    run(&db, "b.txt").unwrap();
+    assert_eq!(read(&dir, "log.txt"), "a\nb\nb\nA\n");
+
+    fs::write(dir.path().join(HISTORY_FILE), "not json").unwrap();
+    assert!(TaskDb::new(dir.path()).load_history(HISTORY_FILE).is_err());
 }
 ```

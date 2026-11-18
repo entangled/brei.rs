@@ -1,7 +1,7 @@
 To do
 =====
 
-The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-17, after commit `fd5cd35`.
+The plan for the rest of the port of Brei (`../brei`, the Python version) to Rust. Last updated 2026-11-18, after adding the persistent history.
 
 Done so far
 -----------
@@ -23,15 +23,12 @@ Done so far
   - `needs_run`, running commands (with or without a runner, and `stdin`/`stdout` to files or variables), and killing them on cancel.
   - Engine jobs: `Build` (memoized per target), `Run` and `Alias`. A rule with several targets runs once.
   - The entry point is `tasks::build`.
+- **Persistent history** (`brei.md`, `src/tasks/history.rs`): `TaskDb::load_history` and `save_history` read and write a JSON file (`HISTORY_FILE`, `.brei_history`) that maps paths to digests. A missing file is an empty history; saving writes a temporary file and renames it. This is not compatible with Python history files that contain `null` digests.
 
 Remaining work
 --------------
 
-In the suggested order.
-
-### 1. Persistent history
-
-Read and write the history file (JSON, mapping path to MD5 digest). The format should match Python's `TaskDb.read_history` and `write_history` in `../brei/brei/task.py`, so existing history files keep working. Right now `TaskDb.history` is a `Mutex<HashMap<PathBuf, String>>` that lives in memory only. Load it before a run and save it afterwards, also when the run fails: targets of failed rules have already been forgotten.
+In the suggested order. Item 1, the persistent history, is done.
 
 ### 2. Building several targets
 
@@ -77,7 +74,7 @@ In Python this is a separate async pass before the build. It could also run as a
 - `-j` jobs (the size of the `WorkerPool`);
 - `--list-runners`, `--version` and `--debug`.
 
-Probably use `clap`. Run with `WorkerPool`.
+Probably use `clap`. Run with `WorkerPool`. Load the history before the run and save it afterwards, also when the run fails.
 
 ### 7. Logging
 
@@ -89,7 +86,7 @@ Port the examples and tests in `../brei/test` as integration tests, to check tha
 
 ### 9. Housekeeping
 
-- Remove the unused `futures` dependency. `serde_json` and `toml` will be needed for items 1 and 5.
+- Remove the unused `futures` dependency. `toml` will be needed for item 5.
 - Maybe move to edition 2024, which allows `let` chains in the kernel.
 
 Known limitations
