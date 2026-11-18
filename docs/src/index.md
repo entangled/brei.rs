@@ -20,7 +20,7 @@ Why yet another workflow tool? This tool was developed as part of the [Entangled
 ## When to use
 You're running a project, there's lots of odds and ends that need automisation. You'd use a `Makefile` but your friend is on Windows and doesn't have GNU Make installed. You try to ship a product that needs this, but don't want to confront people trying it for the first time with a tonne of stuff they've never heard of.
 
-# Running
+## Running
 Install Brei with Cargo:
 
 ```
@@ -34,10 +34,10 @@ Then `brei` should be available as a command-line executable. Without `-i`, it r
 brei --help
 ```
 
-# How it works
+## How it works
 You give Brei a list of tasks that may depend on one another. Brei will run these when input files are newer than the target, or when the script that creates the target changed since the last run (Brei keeps a history in `.brei_history`). Execution is lazy and in parallel.
 
-## Tasks
+### Tasks
 Tasks are the elemental units of work in Brei. A task is the single execution of a given script, and can be indicated to depend on previous tasks by explicitly listing targets and dependencies.
 
 ```toml
@@ -58,7 +58,7 @@ script = "rm hello.txt"
 
 This defines to named tasks `all` and `clean`, where `all` depends on the creation of a file `hello.txt`. Giving a `name` to a task is similar to creating a 'phony' target in Make.
 
-## Templates
+### Templates
 We can use patterns to create reusable items. Variables are written like in many scripting languages: `${var_name}` (or `$var_name`) substitutes for the contents of the `var_name` variable. Use two dollar signs `$$` to make a `$` literal. Any other dollar sign is left alone, so scripts can use things like `$(pwd)` or `$1` without escaping them.
 
 ```toml
@@ -145,7 +145,7 @@ The `collect` argument creates a collection phony task containing all items in t
 brei -i examples/template_multiplexing.toml all
 ```
 
-## Variables
+### Variables
 You may write the output of a command to the contents of a variable, by using `"var(name)"` as a target.
 For instance, in many science applications its desirable to know which version of a software generated some output. 
 
@@ -185,7 +185,7 @@ Also note the following:
 - The `[environment]` item lists global variables.
 - All string substitution is done lazily.
 
-## List variables
+### List variables
 A task can also write its output to a list variable, by using `"listvar(name)"` as `stdout`. Each line of the output becomes an element of the list; empty lines are skipped. You can then use `"splice(name)"` as an element of a list in the arguments of a template call, to create a task for each element, or in `requires`, to depend on all of them. For instance, to copy all figures to the website:
 
 ```toml
@@ -231,7 +231,7 @@ List variables are kept simple on purpose:
 
 Brei has no functions to work on file names. Instead, have the listing print what the template needs, like the file names above. For anything more involved, generate a workflow and include it, see the next section.
 
-## Includes
+### Includes
 You can include parts of a workflow from other files, in TOML, YAML or JSON.
 
 ```toml
@@ -297,7 +297,7 @@ requires = ["#write-outs"]
 brei -i examples/include-gen.toml all
 ```
 
-## Custom Runner
+### Custom Runner
 By default, the contents of `script` is split in lines, each line is split into arguments like a Unix shell would, and run as a command directly, without a shell. What that means is that the script will perform the same operations on all platforms, but there are no pipes, redirections or shell variables. However, you can choose to have the script run by any other means by providing the `runner` argument.
 
 
@@ -345,7 +345,7 @@ There are a number of runners configured by default.
 brei --list-runners
 ```
 
-## Forcing a rerun
+### Forcing a rerun
 Sometimes you want to always rerun a task no matter what. Brei measures its own test coverage this way, with this `brei.toml`. The tests run every time, also when no source file changed: they use other programs too, like `bash` and `python`, and Brei can't see when those change. The other tasks run whenever there is a new profile.
 
 The LLVM tools that read the profiles have to be the same version as the LLVM in `rustc`, so we use the ones that come with it (install them with `rustup component add llvm-tools`). Every process that runs during the tests (the test binaries, and the `brei` binary that some of them run) writes a raw profile of its own, and these are merged into one.
@@ -408,15 +408,15 @@ To pass the executables to `llvm-cov`, we list them by building the tests again,
 brei coverage
 ```
 
-## Remarks
+### Remarks
 
 - If you need your workflows also execute on a Windows machine, it is advised to write scripts for the default runner (lists of commands) or in a language like Python.
 - Brei is not meant for building programs, so it doesn't have the same feature set as GNU Make. If you need more complex logic, you can write a Brei generator. The generator creates tasks, writes them to JSON and then Brei can `include` the result from your generator task.
 - TOML is nice but not ideal: it can be tricky to see the difference beteween single `[...]` and double `[[...]]` square brackets. Sometimes TOML syntax will lead to very verbose notation, however, current alternatives are all worse.
 - Many modern programming languages that we like (Python, Rust, Julia) have their project settings in a TOML file. This way your Brei workflow can piggy-back on project files that are already there.
 
-# License
+## License
 Copyright 2023 Netherlands eScience Center, Licensed under the Apache License, Version 2.0, see [LICENSE](https://github.com/entangled/brei.rs/blob/main/LICENSE).
 
-# Use of generative AI
+### Use of generative AI
 Significant parts of this port from Python to Rust were done by Claude Opus 5.5, a large language model by Anthropic, working in [Claude Code](https://claude.com/claude-code). It worked under the direction of the author, who set the design and the conventions. The first version of the task engine (`noodles`), the template strings, and the literate setup of the project were written by hand. Claude wrote most of the rest: the engine's memoization, cancellation and cycle detection; the Brei rules, variables, templates and program resolution; the program loader and the command-line interface; the tests ported from Python Brei; and this book's tooling for coverage and running examples. Most of the prose in this book was written by Claude as well. Commits with Claude's work are marked `Co-Authored-By: Claude` in the Git history.
