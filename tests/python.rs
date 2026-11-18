@@ -620,7 +620,7 @@ fn example_template_multiplexing() {
     workflow.run(&["all"]);
     let tmp = fs::read_dir(workflow.dir.path()).unwrap()
         .map(|e| e.unwrap().path())
-        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("tmp."))
+        .find(|p| p.is_dir())
         .expect("temporary directory");
     let mut files: Vec<String> = fs::read_dir(tmp).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     files.sort();
