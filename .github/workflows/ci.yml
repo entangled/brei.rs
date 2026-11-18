@@ -16,7 +16,15 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # The tests run Unix tools like `echo` and `tr`. On Windows, Git Bash puts these on the path.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -26,13 +34,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Some tests run Python scripts, and one example needs `lua`.
+      # Some tests run Python scripts, and one example needs `lua` (it is skipped without).
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
       - name: Install Lua
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y lua5.4
+
+      - name: Install Lua
+        if: runner.os == 'macOS'
+        run: brew install lua
 
       - name: Test
         run: cargo test --locked
@@ -41,6 +54,7 @@ jobs:
         run: cargo clippy --locked --all-targets
 
       - name: Documentation
+        if: runner.os == 'Linux'
         run: cargo doc --locked --no-deps
 
   # Check that the crate builds with the oldest Rust it claims to support (`rust-version`).
