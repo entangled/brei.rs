@@ -20,8 +20,26 @@ Brei was developed as part of the [Entangled project](https://entangled.github.i
 
 ## Installing
 
+Brei is a single binary, with nothing else to install. On Linux it is linked statically, so it runs on any distribution.
+
+Install the latest release with:
+
+```sh
+# Linux, macOS
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/entangled/brei.rs/releases/latest/download/brei-installer.sh | sh
 ```
-cargo install --git https://github.com/entangled/brei.rs
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/entangled/brei.rs/releases/latest/download/brei-installer.ps1 | iex"
+```
+
+These put `brei` in `~/.cargo/bin`. To put it somewhere else, download the archive for your platform from the [releases page](https://github.com/entangled/brei.rs/releases), and copy `brei` (or `brei.exe`) to any directory on your `PATH`.
+
+With Rust, you can also build it from source:
+
+```
+cargo install brei
 ```
 
 ## Usage
