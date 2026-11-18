@@ -54,13 +54,17 @@ impl fmt::Display for Failure {
 }
 // ~/~ end
 // ~/~ begin <<docs/src/brei.md#brei::rule-runner>>[init]
+/// A command that runs a script file.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Runner {
+    /// The program to run.
     pub command: String,
+    /// Its arguments, where `${script}` is the path of the script file.
     pub args: Vec<String>,
 }
 
+/// The runners that come with Brei, by name: `bash` and `python`.
 pub fn default_runners() -> HashMap<String, Runner> {
     let runner = |command: &str| Runner { command: command.into(), args: vec!["${script}".into()] };
     HashMap::from([

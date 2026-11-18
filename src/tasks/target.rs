@@ -165,12 +165,9 @@ impl Targets {
         self.table.read().unwrap().targets[id.0 as usize].clone()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.table.read().unwrap().targets.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 // ~/~ end

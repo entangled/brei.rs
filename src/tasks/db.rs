@@ -98,11 +98,5 @@ impl TaskDb {
     pub fn runner(&self, name: &str) -> Option<Runner> {
         self.runners.read().unwrap().get(name).cloned()
     }
-
-    pub fn runner_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.runners.read().unwrap().keys().cloned().collect();
-        names.sort();
-        names
-    }
 }
 // ~/~ end

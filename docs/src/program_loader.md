@@ -28,12 +28,18 @@ Errors
 
 ```rust
 //| id: loader-error
+/// Why a program can't be read.
 #[derive(Debug)]
 pub enum LoadError {
+    /// The file can't be read.
     Io(PathBuf, String),
+    /// The extension isn't `.toml`, `.yaml`, `.yml` or `.json`.
     UnknownFormat(PathBuf),
+    /// The file isn't a valid program.
     Invalid(PathBuf, String),
+    /// The file doesn't have the given section.
     MissingSection(PathBuf, String),
+    /// No input file was given, and none was found.
     NoInput,
 }
 

@@ -65,6 +65,7 @@ impl<T: Task> Kernel<T> {
     }
 
     /// Number of entries in the memo.
+    #[cfg(test)]
     pub fn memo_count(&self) -> usize {
         self.memo.len()
     }

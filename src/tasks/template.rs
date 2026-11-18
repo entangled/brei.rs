@@ -7,18 +7,29 @@ use super::db::{Kind, Recipe, TaskDb};
 use super::rule::{Failure, Rule, RuleError};
 use super::target::{wrapped, Target, VarType};
 
+/// A task, or a template, as written in a program. All strings are template strings.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuleTemplate {
+    /// The targets the task creates.
     pub creates: Vec<String>,
+    /// The targets the task needs; `splice(name)` adds the elements of a list variable.
     pub requires: Vec<String>,
+    /// Makes the task available as the phony target `#name`.
     pub name: Option<String>,
+    /// The runner of the script; without one, every line of the script is a command.
     pub runner: Option<String>,
+    /// A script file to run instead of `script`; needs a runner.
     pub path: Option<String>,
+    /// The script to run.
     pub script: Option<String>,
+    /// Standard input: a file, or a scalar variable `var(name)`.
     pub stdin: Option<String>,
+    /// Standard output: a file, `var(name)` or `listvar(name)`.
     pub stdout: Option<String>,
+    /// Shown in the log when the task runs.
     pub description: Option<String>,
+    /// Always run the task.
     pub force: bool,
 }
 

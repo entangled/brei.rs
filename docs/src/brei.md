@@ -26,14 +26,17 @@ mod job;
 #[cfg(test)]
 mod tests;
 
-pub use target::{Target, VarType, TargetId, Targets, Key, EmptyTarget, TypeMismatch};
-pub use rule::{Rule, RuleError, Runner, Value, Failure, default_runners};
+pub use target::{Target, TargetId, Key};
+pub use rule::{Runner, default_runners};
 pub use db::TaskDb;
 pub use template::RuleTemplate;
 pub use history::HISTORY_FILE;
 pub use group::kill_all;
-pub use program::{Program, Call, Argument, Join, ProgramError, resolve};
-pub use job::{Job, build, build_all};
+pub use program::{Program, Call, Argument, Join, resolve};
+pub use job::{Job, build_all};
+
+#[cfg(test)]
+pub(crate) use {rule::{Rule, RuleError, Value, Failure}, job::build};
 ```
 
 Targets
@@ -283,12 +286,9 @@ impl Targets {
         self.table.read().unwrap().targets[id.0 as usize].clone()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.table.read().unwrap().targets.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 ```
@@ -469,13 +469,17 @@ A runner is a command that runs a script. Its arguments are template strings, wh
 
 ```rust
 //| id: rule-runner
+/// A command that runs a script file.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Runner {
+    /// The program to run.
     pub command: String,
+    /// Its arguments, where `${script}` is the path of the script file.
     pub args: Vec<String>,
 }
 
+/// The runners that come with Brei, by name: `bash` and `python`.
 pub fn default_runners() -> HashMap<String, Runner> {
     let runner = |command: &str| Runner { command: command.into(), args: vec!["${script}".into()] };
     HashMap::from([
@@ -719,12 +723,6 @@ impl TaskDb {
     pub fn runner(&self, name: &str) -> Option<Runner> {
         self.runners.read().unwrap().get(name).cloned()
     }
-
-    pub fn runner_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.runners.read().unwrap().keys().cloned().collect();
-        names.sort();
-        names
-    }
 }
 ```
 
@@ -794,18 +792,29 @@ use super::db::{Kind, Recipe, TaskDb};
 use super::rule::{Failure, Rule, RuleError};
 use super::target::{wrapped, Target, VarType};
 
+/// A task, or a template, as written in a program. All strings are template strings.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuleTemplate {
+    /// The targets the task creates.
     pub creates: Vec<String>,
+    /// The targets the task needs; `splice(name)` adds the elements of a list variable.
     pub requires: Vec<String>,
+    /// Makes the task available as the phony target `#name`.
     pub name: Option<String>,
+    /// The runner of the script; without one, every line of the script is a command.
     pub runner: Option<String>,
+    /// A script file to run instead of `script`; needs a runner.
     pub path: Option<String>,
+    /// The script to run.
     pub script: Option<String>,
+    /// Standard input: a file, or a scalar variable `var(name)`.
     pub stdin: Option<String>,
+    /// Standard output: a file, `var(name)` or `listvar(name)`.
     pub stdout: Option<String>,
+    /// Shown in the log when the task runs.
     pub description: Option<String>,
+    /// Always run the task.
     pub force: bool,
 }
 

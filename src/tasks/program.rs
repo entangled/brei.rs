@@ -14,39 +14,57 @@ use super::target::{Target, TypeMismatch, VarType};
 use super::template::{RuleTemplate, escape, splice_name, substitute, variables};
 
 // ~/~ begin <<docs/src/program.md#program::program-types>>[init]
+/// A Brei program: the contents of a workflow file.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Program {
+    /// The tasks.
     pub task: Vec<RuleTemplate>,
+    /// Variables with a fixed value, a template string.
     pub environment: BTreeMap<String, String>,
+    /// Templates, by name, to be filled in by calls.
     pub template: HashMap<String, RuleTemplate>,
+    /// Calls of templates.
     pub call: Vec<Call>,
+    /// Paths of other programs to include, template strings.
     pub include: Vec<String>,
+    /// Extra runners, by name.
     pub runner: HashMap<String, Runner>,
 }
 
+/// How a call combines arguments that are lists.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Join {
+    /// The first elements of all lists, then the second, and so on.
     #[default]
     Inner,
+    /// Every combination of elements.
     Outer,
 }
 
+/// An argument of a call.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 pub enum Argument {
+    /// A single value.
     Single(String),
+    /// A list of values: the template is filled in for each.
     Multiple(Vec<String>),
 }
 
+/// A call of a template.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Call {
+    /// The name of the template.
     pub template: String,
+    /// The values of the variables of the template.
     pub args: BTreeMap<String, Argument>,
+    /// The name of a phony target that requires all targets of the call.
     #[serde(default)]
     pub collect: Option<String>,
+    /// How to combine arguments that are lists.
     #[serde(default)]
     pub join: Join,
 }

@@ -49,6 +49,8 @@ Done so far
 - **Process groups** (`brei.md`, `src/tasks/group.rs`): on Unix, each command runs in its own process group, and cancelling kills the whole group. Because commands then no longer get the terminal's Ctrl-C, the library keeps a registry of running groups, and the binary installs a handler (`ctrlc`) that calls `tasks::kill_all`.
 - **Local cycles** (`engine.md`): the kernel checks every promise it adds for tasks that wait for each other (`Promise::cycle`, a depth-first search), and reports them as `Error::Cycle`.
 - **Variable rules always run** (`brei.md`): a rule whose `stdout` is a variable is always run, also when it creates files that are up to date, so the variable gets a value. Python gives `None` in that case.
+- **Library API** (`main_module.md`): the modules are private. The library exports what a front end (like a future Python package) needs: the program types (`Program`, `RuleTemplate`, `Call`, `Argument`, `Join`, `Runner`), `read_program`, `run` with `Options` and `Error`, `default_runners` and `kill_all`. The binary uses only these. Public items must have docs (`missing_docs`).
+- **Crate** (`Cargo.toml`, `.github/workflows/ci.yml`): metadata for crates.io, a package with only the sources (the Rust files, the tests and the book's Markdown), and `rust-version = "1.89"` (set by `serde-saphyr`). CI runs the tests, clippy and rustdoc with warnings as errors, and checks the build with Rust 1.89.
 
 Remaining work
 --------------

@@ -29,8 +29,16 @@ pub enum Response<T: Task> {
 #[derive(Debug)]
 pub enum InternalError {
     SendError(String),
-    MissingFrame(u64),
     NoResult
+}
+
+impl std::fmt::Display for InternalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InternalError::SendError(msg) => write!(f, "can't send a task to a worker: {msg}"),
+            InternalError::NoResult => write!(f, "the kernel stopped without a result"),
+        }
+    }
 }
 
 pub enum Error<T: Task> {

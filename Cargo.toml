@@ -2,7 +2,15 @@
 name = "brei"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 license = "Apache-2.0"
+description = "A small but versatile workflow system, with workflows in TOML, YAML or JSON"
+repository = "https://github.com/entangled/brei.rs"
+homepage = "https://entangled.github.io/brei.rs"
+readme = "README.md"
+keywords = ["workflow", "build", "make", "task-runner", "literate-programming"]
+categories = ["command-line-utilities", "development-tools::build-utils"]
+include = ["/src/**", "/tests/**", "/docs/src/*.md", "/LICENSE", "/README.md"]
 
 [dependencies]
 clap = { version = "4.6.8", features = ["derive"] }

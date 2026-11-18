@@ -9,9 +9,10 @@ Every time a task is complete, its key is looked up in an inverse dependency map
 //| file: src/noodles/mod.rs
 pub mod task;
 pub mod kernel;
-pub mod single_worker;
 pub mod worker_pool;
 
+#[cfg(test)]
+pub mod single_worker;
 #[cfg(test)]
 mod mock;
 ```
@@ -48,8 +49,16 @@ pub enum Response<T: Task> {
 #[derive(Debug)]
 pub enum InternalError {
     SendError(String),
-    MissingFrame(u64),
     NoResult
+}
+
+impl std::fmt::Display for InternalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InternalError::SendError(msg) => write!(f, "can't send a task to a worker: {msg}"),
+            InternalError::NoResult => write!(f, "the kernel stopped without a result"),
+        }
+    }
 }
 
 pub enum Error<T: Task> {
@@ -283,6 +292,7 @@ impl<T: Task> Kernel<T> {
     }
 
     /// Number of entries in the memo.
+    #[cfg(test)]
     pub fn memo_count(&self) -> usize {
         self.memo.len()
     }
